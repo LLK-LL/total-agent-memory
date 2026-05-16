@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-total-memory"
-version = "11.2.1"
+version = "11.2.2"
 description = "total-agent-memory — persistent memory MCP server for Claude Code & Codex CLI: 46 tools — knowledge graph, temporal facts, procedural memory, episodic memory, AST ingest, pre-edit guard, auto-consolidating error capture"
 readme = "README.md"
 license = "MIT"
@@ -46,9 +46,35 @@ claude-total-memory = "claude_total_memory.server:main_sync"
 ctm-lookup = "claude_total_memory.lookup:main"
 lookup-memory = "claude_total_memory.lookup:main"
 
+# Pack BOTH the user-facing `claude_total_memory` thin wrapper AND the
+# heavy `src/` runtime that it loads at startup. Without `src*` in
+# includes, `claude-total-memory` falls over with `Error: server.py not
+# found` (the wrapper resolves `../src/server.py` relative to itself,
+# which only exists in a git checkout).
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["claude_total_memory*"]
+include = [
+    "claude_total_memory*",
+    "src*",
+]
+exclude = [
+    "tests*",
+    "benchmarks*",
+    "docs*",
+    "scripts*",
+]
+
+# Ship non-Python sidecar files (SQL migrations, vocabularies, etc.)
+# alongside the modules. Without this they vanish in the wheel and the
+# server crashes on first migration.
+[tool.setuptools.package-data]
+src = [
+    "**/*.sql",
+    "**/*.json",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.txt",
+]
 
 [tool.pytest.ini_options]
 markers = [
