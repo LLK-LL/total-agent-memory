@@ -940,6 +940,21 @@ class Store:
         if "branch" not in cols:
             self.db.execute("ALTER TABLE knowledge ADD COLUMN branch TEXT DEFAULT ''")
             LOG("Migration: added branch to knowledge table")
+        # Claude Code v2.1.139+ subagent lineage (OTEL agent_id / parent_agent_id)
+        if "agent_id" not in cols:
+            self.db.execute("ALTER TABLE knowledge ADD COLUMN agent_id TEXT DEFAULT NULL")
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_k_agent_id "
+                "ON knowledge(agent_id) WHERE agent_id IS NOT NULL"
+            )
+            LOG("Migration: added agent_id to knowledge table")
+        if "parent_agent_id" not in cols:
+            self.db.execute("ALTER TABLE knowledge ADD COLUMN parent_agent_id TEXT DEFAULT NULL")
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_k_parent_agent_id "
+                "ON knowledge(parent_agent_id) WHERE parent_agent_id IS NOT NULL"
+            )
+            LOG("Migration: added parent_agent_id to knowledge table")
 
         sess_cols = {r[1] for r in self.db.execute("PRAGMA table_info(sessions)").fetchall()}
         if "branch" not in sess_cols:
@@ -1297,6 +1312,7 @@ class Store:
     def save_knowledge(self, sid, content, ktype, project="general", tags=None,
                         context="", branch="", skip_dedup=False, filter_name=None,
                         importance="medium", skip_quality=False, coref=None,
+                        agent_id=None, parent_agent_id=None,
                         _from_outbox=False):
         """Save knowledge. Returns
         ``(record_id, was_deduplicated, was_redacted, private_sections, quality_meta)``.
@@ -1332,12 +1348,14 @@ class Store:
                 context=context, branch=branch, skip_dedup=skip_dedup,
                 filter_name=filter_name, importance=importance,
                 skip_quality=skip_quality, coref=coref,
+                agent_id=agent_id, parent_agent_id=parent_agent_id,
                 _from_outbox=_from_outbox,
             )
 
     def _save_knowledge_impl(self, sid, content, ktype, project="general", tags=None,
                               context="", branch="", skip_dedup=False, filter_name=None,
                               importance="medium", skip_quality=False, coref=None,
+                              agent_id=None, parent_agent_id=None,
                               _from_outbox=False):
         """Underlying implementation; wrapped by `save_knowledge` for telemetry."""
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1357,6 +1375,7 @@ class Store:
                         "project": project, "tags": list(tags or []),
                         "context": context or "", "branch": branch or "",
                         "filter_name": filter_name, "importance": importance,
+                        "agent_id": agent_id, "parent_agent_id": parent_agent_id,
                     },
                     session_id=sid, content=content, ktype=ktype, project=project,
                 )
@@ -1553,12 +1572,33 @@ class Store:
 
         cur = self.db.execute("""
             INSERT INTO knowledge (session_id,type,content,context,project,tags,source,confidence,
-                                   created_at,last_confirmed,recall_count,branch,importance)
-            VALUES (?,?,?,?,?,?,'explicit',1.0,?,?,0,?,?)
+                                   created_at,last_confirmed,recall_count,branch,importance,
+                                   agent_id,parent_agent_id)
+            VALUES (?,?,?,?,?,?,'explicit',1.0,?,?,0,?,?,?,?)
         """, (sid, ktype, content, context, project, json.dumps(tags or []), now, now,
-              branch or "", importance_value))
+              branch or "", importance_value, agent_id, parent_agent_id))
         self.db.commit()
         rid = cur.lastrowid
+
+        # v2.1.145 agent lineage — when both agent and parent ids are present
+        # record a `spawned_by` assertion in the temporal KG so recall can
+        # answer "which subagent ran for which parent". add_fact is idempotent
+        # on (subject, predicate, object) so repeat saves are no-ops.
+        if agent_id and parent_agent_id:
+            try:
+                from temporal_kg import TemporalKG
+                TemporalKG(self.db).add_fact(
+                    subject=str(agent_id),
+                    predicate="spawned_by",
+                    object=str(parent_agent_id),
+                    confidence=1.0,
+                    context=f"Observed during memory_save (record id={rid})",
+                    source="agent-lineage",
+                    project=project,
+                    invalidate_previous=False,  # subagent lineage is immutable
+                )
+            except Exception as _kg_err:
+                LOG(f"agent-lineage kg_add_fact skipped: {_kg_err}")
 
         # v11 §J Phase 5b — classify FIRST, then embed via the
         # per-space provider so code chunks really go through the code
@@ -3849,6 +3889,14 @@ async def list_tools():
                         "type": "boolean",
                         "description": "Opt into v10 coreference rewrite — expand pronouns ('after this it broke') into self-contained text using recent session history. Costs ~1s LLM round-trip; default off.",
                     },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Optional Claude Code subagent ID (x-claude-code-agent-id header / OTEL agent_id attribute, v2.1.139+). Lets recall trace which subagent produced this knowledge.",
+                    },
+                    "parent_agent_id": {
+                        "type": "string",
+                        "description": "Optional parent agent ID (the dispatching Agent tool / parent span). Together with agent_id forms the subagent lineage tree.",
+                    },
                 },
                 "required": ["content", "type"],
             },
@@ -4608,6 +4656,8 @@ async def list_tools():
                     "branch": {"type": "string"},
                     "filter": {"type": "string"},
                     "importance": {"type": "string", "enum": ["critical", "high", "medium", "low"], "default": "medium"},
+                    "agent_id": {"type": "string", "description": "Optional Claude Code subagent ID (v2.1.139+)"},
+                    "parent_agent_id": {"type": "string", "description": "Optional parent agent ID (the dispatching span)"},
                 },
                 "required": ["content", "type"],
             },
@@ -5272,7 +5322,9 @@ async def _do(name, a):
             a.get("project", "general"), a.get("tags", []), a.get("context", ""),
             branch=a.get("branch", BRANCH), filter_name=a.get("filter"),
             importance=a.get("importance", "medium"),
-            coref=a.get("coref"))
+            coref=a.get("coref"),
+            agent_id=a.get("agent_id"),
+            parent_agent_id=a.get("parent_agent_id"))
         # v10 — quality gate dropped the record; surface the verdict so the
         # caller can iterate on the content rather than silently losing it.
         if rid is None:
@@ -6082,6 +6134,8 @@ async def _do(name, a):
             importance=a.get("importance", "medium"),
             skip_quality=True,  # the explicit fast contract: no quality gate
             coref=False,        # never spend an LLM round-trip on the fast path
+            agent_id=a.get("agent_id"),
+            parent_agent_id=a.get("parent_agent_id"),
         )
         if rid is None:
             return J({"saved": False, "rejected_by_quality_gate": False,

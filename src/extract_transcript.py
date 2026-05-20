@@ -83,6 +83,15 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
     first_ts = None
     last_ts = None
 
+    # Claude Code v2.1.139+ subagent lineage tracking. We pick up explicit
+    # agent_id / parent_agent_id when the transcript carries them (Anthropic
+    # may add these fields in a future Claude Code release), and we also
+    # fall back to `isSidechain=True` as a proxy signal that a subagent did
+    # work in this session.
+    agent_ids: set[str] = set()
+    parent_agent_ids: set[str] = set()
+    sidechain_count = 0
+
     with open(transcript_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -105,6 +114,21 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
                 if not first_ts:
                     first_ts = ts
                 last_ts = ts
+
+            # Agent lineage — accept both snake_case and camelCase, since the
+            # exact field name is not yet contracted upstream.
+            for key in ("agent_id", "agentId"):
+                v = obj.get(key)
+                if isinstance(v, str) and v:
+                    agent_ids.add(v)
+                    break
+            for key in ("parent_agent_id", "parentAgentId"):
+                v = obj.get(key)
+                if isinstance(v, str) and v:
+                    parent_agent_ids.add(v)
+                    break
+            if obj.get("isSidechain") is True:
+                sidechain_count += 1
 
             # Only process user and assistant messages
             msg = obj.get("message")
@@ -206,6 +230,9 @@ def extract(transcript_path: str, session_id: str, output_dir: str) -> dict:
         "files_written": files_written[:20],
         "extracted_at": datetime.now(tz=timezone.utc).isoformat(),
         "status": "pending",
+        "agent_ids": sorted(agent_ids),
+        "parent_agent_ids": sorted(parent_agent_ids),
+        "sidechain_count": sidechain_count,
     }
 
     # Trim conversation if output too large
@@ -261,6 +288,23 @@ def auto_save_knowledge(db_path: str, session_id: str, data: dict) -> list:
     files = data.get("files_written", [])
     tools = data.get("tools_used", [])
     stats = data.get("stats", {})
+
+    # Subagent lineage proxy. If the transcript carries explicit
+    # agent_id / parent_agent_id, persist them on the auto-extracted rows.
+    # Otherwise, if any sidechain activity was observed, mark the rows with
+    # a deterministic "session-<id>" agent_id so recall can filter sessions
+    # that involved subagent work even before Claude Code writes the real
+    # fields. None means "no subagent activity in this session" — keeps
+    # column NULL.
+    agent_ids = data.get("agent_ids") or []
+    parent_agent_ids = data.get("parent_agent_ids") or []
+    sidechain_count = int(data.get("sidechain_count", 0) or 0)
+
+    session_agent_id = agent_ids[0] if agent_ids else (
+        f"session-{session_id}" if sidechain_count > 0 else None
+    )
+    session_parent_agent_id = parent_agent_ids[0] if parent_agent_ids else None
+    extra_tags = ["has-subagent-work"] if sidechain_count > 0 else []
 
     records = []
 
@@ -336,6 +380,12 @@ def auto_save_knowledge(db_path: str, session_id: str, data: dict) -> list:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=NORMAL")
 
+        # Detect whether the agent-lineage columns exist (migration 028).
+        # Older installs without the migration fall back to the legacy INSERT
+        # so this script keeps working across upgrades.
+        cols = {r[1] for r in db.execute("PRAGMA table_info(knowledge)").fetchall()}
+        has_lineage = "agent_id" in cols and "parent_agent_id" in cols
+
         now = datetime.now(tz=timezone.utc).isoformat()
 
         for record in records:
@@ -349,20 +399,41 @@ def auto_save_knowledge(db_path: str, session_id: str, data: dict) -> list:
                 saved_ids.append(existing[0])
                 continue
 
-            cur = db.execute("""
-                INSERT INTO knowledge (session_id, type, content, context, project, tags,
-                                       source, confidence, created_at, last_confirmed, recall_count)
-                VALUES (?, ?, ?, ?, ?, ?, 'auto-extract', 0.7, ?, ?, 0)
-            """, (
-                dedup_key,
-                record["type"],
-                sanitize(record["content"]),
-                record["context"],
-                project,
-                json.dumps(record["tags"]),
-                now,
-                now,
-            ))
+            row_tags = list(record["tags"]) + extra_tags
+
+            if has_lineage:
+                cur = db.execute("""
+                    INSERT INTO knowledge (session_id, type, content, context, project, tags,
+                                           source, confidence, created_at, last_confirmed, recall_count,
+                                           agent_id, parent_agent_id)
+                    VALUES (?, ?, ?, ?, ?, ?, 'auto-extract', 0.7, ?, ?, 0, ?, ?)
+                """, (
+                    dedup_key,
+                    record["type"],
+                    sanitize(record["content"]),
+                    record["context"],
+                    project,
+                    json.dumps(row_tags),
+                    now,
+                    now,
+                    session_agent_id,
+                    session_parent_agent_id,
+                ))
+            else:
+                cur = db.execute("""
+                    INSERT INTO knowledge (session_id, type, content, context, project, tags,
+                                           source, confidence, created_at, last_confirmed, recall_count)
+                    VALUES (?, ?, ?, ?, ?, ?, 'auto-extract', 0.7, ?, ?, 0)
+                """, (
+                    dedup_key,
+                    record["type"],
+                    sanitize(record["content"]),
+                    record["context"],
+                    project,
+                    json.dumps(row_tags),
+                    now,
+                    now,
+                ))
             saved_ids.append(cur.lastrowid)
 
         db.commit()

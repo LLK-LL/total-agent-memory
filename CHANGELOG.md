@@ -4,6 +4,74 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [12.1.0] — 2026-05-20 — Claude Code v2.1.145 subagent lineage
+
+Adds first-class support for the **agent lineage** signals that Claude Code
+v2.1.139+ began emitting (`x-claude-code-agent-id` / `x-claude-code-parent-agent-id`
+HTTP headers; same as `agent_id` / `parent_agent_id` attributes on
+`claude_code.tool` and `claude_code.llm_request` OTEL spans). Recall can now
+answer "what did subagent X (dispatched from parent Y) produce".
+
+### Added
+
+- **Migration `028_agent_lineage.sql`** — adds nullable `agent_id` and
+  `parent_agent_id` columns to `knowledge` plus two partial indexes
+  (`WHERE … IS NOT NULL`) so lineage filters cost the same as a regular
+  recall.
+- **`memory_save` / `memory_save_fast` MCP tool inputs** — two new optional
+  fields:
+  - `agent_id` — subagent ID as carried by Claude Code (header / OTEL attribute).
+  - `parent_agent_id` — the dispatching agent / parent span.
+  Schemas are reflected by `/mcp` after a reconnect; pre-v2.1.145 callers
+  see no behaviour change.
+- **`save_knowledge()` Python signature** gains the same two keyword
+  arguments. They flow into the outbox payload so a mid-save crash replay
+  re-applies the lineage instead of dropping it.
+- **`extract_transcript.py` ingests lineage from session `.jsonl`s.**
+  - Reads `agent_id` / `agentId` and `parent_agent_id` / `parentAgentId`
+    when Claude Code populates them (forward-compatible — naming is not
+    yet contracted upstream).
+  - Falls back to the **`isSidechain=true`** signal as a proxy: any session
+    with at least one sidechain entry gets `agent_id = "session-<id>"` on
+    its auto-extracted rows and a `has-subagent-work` tag, so recall can
+    surface "sessions where a subagent ran" even before Anthropic writes
+    the explicit fields.
+  - Graceful schema check (`PRAGMA table_info`) keeps the script working
+    on installs where migration 028 has not been applied.
+- **Automatic `spawned_by` KG fact.** When `_save_knowledge_impl()` is
+  called with both `agent_id` and `parent_agent_id`, it now records
+  `TemporalKG.add_fact(agent, "spawned_by", parent, source="agent-lineage",
+  invalidate_previous=False)`. Idempotent on (subject, predicate, object).
+  `kg_at(timestamp)` and `kg_timeline()` can now reconstruct the subagent
+  lineage tree at any past moment.
+
+### Changed
+
+- `INSERT INTO knowledge` in `server.py` now writes 15 → 17 columns,
+  carrying the lineage on every save. The base `CREATE TABLE IF NOT EXISTS`
+  is unchanged — the columns appear via the idempotent `_migrate()` step
+  so fresh installs and upgrades converge to the same schema.
+
+### Compatibility
+
+- Both columns are nullable. Existing rows, callers that don't pass the
+  ids, outbox replays of old intents, and consumers of `memory_recall`
+  are unaffected.
+- The new MCP tool fields are optional. Pre-v2.1.145 Claude Code does not
+  pass them; behaviour matches v12.0.x.
+- A reconnect of the MCP `memory` server is required for clients to see
+  the updated `inputSchema` for `memory_save` / `memory_save_fast`.
+
+### Companion changes outside this repo
+
+- `~/.claude/hooks/on-stop.sh` — reads `background_tasks` and `session_crons`
+  from the Stop hook payload (v2.1.145+) and appends a section to the
+  recovery file. Also fixes a stale path: `~/claude-memory-server` →
+  `~/total-agent-memory/.venv/bin/python`.
+- `claude-statusline 1.2.0` — picks up the new `.github.repo` /
+  `.github.pr.*` fields Claude Code injects in v2.1.145+ and renders a PR
+  badge on line 2.
+
 ## [11.1.0] — 2026-05-14 — Graph dedup + proactive save nudges
 
 Two production bug-fixes from a client report (2026-05-14): "graph

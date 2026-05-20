@@ -24,6 +24,36 @@
 
 ---
 
+## v12.1.0 — Claude Code v2.1.145 subagent lineage (2026-05-20)
+
+Claude Code **v2.1.139+** emits subagent IDs on every API request
+(`x-claude-code-agent-id` / `x-claude-code-parent-agent-id` HTTP headers,
+plus the same fields as `agent_id` / `parent_agent_id` attributes on the
+`claude_code.tool` and `claude_code.llm_request` OTEL spans). v12.1 wires
+these through end-to-end:
+
+- **Schema (migration `028_agent_lineage.sql`)** — nullable `agent_id` and
+  `parent_agent_id` columns on `knowledge`, partial indexes (`WHERE … IS NOT NULL`)
+  so lineage filters are free.
+- **MCP tools** — `memory_save` and `memory_save_fast` accept two new
+  optional inputs: `agent_id` and `parent_agent_id`. Old callers see no
+  behaviour change.
+- **`extract_transcript.py`** — reads `agent_id` / `agentId` /
+  `parent_agent_id` / `parentAgentId` from `.jsonl` when Claude Code writes
+  them, and falls back to `isSidechain=true` as a proxy: sessions with any
+  sidechain activity get `agent_id = "session-<id>"` plus a
+  `has-subagent-work` tag on their auto-extracted rows.
+- **KG fact `spawned_by`** — when `memory_save` carries both ids, the
+  store auto-records `TemporalKG.add_fact(agent, "spawned_by", parent,
+  source="agent-lineage", invalidate_previous=False)`. Idempotent.
+  `kg_at(timestamp)` and `kg_timeline()` can now reconstruct the subagent
+  lineage tree at any past moment.
+
+A reconnect of the MCP `memory` server is required for clients to see the
+updated `inputSchema`. Full notes in [`CHANGELOG.md`](CHANGELOG.md#1210--2026-05-20--claude-code-v21145-subagent-lineage).
+
+---
+
 ## v12.0.0 — rebrand to `total-agent-memory` (2026-05-16)
 
 The project was renamed from `claude-total-memory` to **`total-agent-memory`** to
