@@ -751,6 +751,8 @@ tool_timeout_sec = 120.0
 
 [mcp_servers.memory.env]
 TAM_MEMORY_DIR = "{memory_dir}"
+CLAUDE_MEMORY_DIR = "{memory_dir}"
+MEMORY_MODE = "fast"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 MEMORY_TRIPLE_TIMEOUT_SEC = "120"
 MEMORY_ENRICH_TIMEOUT_SEC = "90"
