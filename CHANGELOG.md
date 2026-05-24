@@ -4,6 +4,62 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [12.2.0] — 2026-05-24 — v11 W3 dispatch fix + Codex env alignment
+
+Bugfix release that restores four previously-broken v11 W3 MCP tools and
+aligns the Codex installer with the `.tam` memory layout.
+
+### Fixed
+
+- **`server._do` v11 W3 dispatch** — `memory_recall_iterative`,
+  `memory_temporal_query`, `memory_entity_resolve`, and
+  `memory_consolidate_status` forwarded the symbol `args`, which is not
+  in scope inside `_do(name, a)`. The resulting `NameError` was caught
+  by `call_tool`'s blanket `except` clause and returned to the client as
+  `"Error: name 'args' is not defined"`, silently disabling all four
+  tools on v12.0.0–v12.1.0. They now receive the correct per-call args.
+
+### Added
+
+- **`tests/test_v11_dispatch_args.py`** — regression coverage that
+  exercises the four v11 W3 branches through `server.call_tool()` with
+  monkey-patched handlers, asserting the args object reaches each
+  handler unchanged.
+
+### Changed
+
+- **Codex installer env (`install.sh --ide codex`)** — writes the
+  canonical `TAM_MEMORY_DIR`, retains `CLAUDE_MEMORY_DIR` as a
+  compatibility alias, and defaults `MEMORY_MODE=fast` so freshly
+  installed Codex clients land on the same hot-path config as
+  Claude Code.
+- **`hooks/lib/common.sh` and `hooks/user-prompt-submit.sh`** — resolve
+  the memory dir via `TAM_MEMORY_DIR` → `CLAUDE_MEMORY_DIR` → `~/.tam`
+  fallback. `hook_project_name` now honours the `MEMORY_PROJECT` env so
+  hooks reporting from a wrapper project (Codex, sub-shells) can pin
+  the project name explicitly.
+- **`tests/test_install_ide_flag.py`** — asserts the new Codex env
+  entries and sandboxes installer runs from the real user `systemctl`
+  / `launchctl` / `XDG_CONFIG_HOME` via a fake `systemctl` shim, so
+  contributors no longer touch their host services when running the
+  suite.
+
+### Compatibility
+
+- No schema or wire-protocol changes. Pure server-side fix plus
+  installer hardening.
+- Existing installs continue to work — `CLAUDE_MEMORY_DIR` still
+  resolves through the alias and `~/.claude-memory/` symlinking
+  remains intact.
+
+### Notes
+
+- Codex hook registration was intentionally **not** included. The
+  shell-style `<system-reminder>` payloads the existing hooks emit
+  don't match Codex's structured JSON hook protocol; a Codex-native
+  hook bridge will land in a follow-up once that protocol is
+  exercised end-to-end.
+
 ## [12.1.0] — 2026-05-20 — Claude Code v2.1.145 subagent lineage
 
 Adds first-class support for the **agent lineage** signals that Claude Code

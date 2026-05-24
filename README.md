@@ -4,7 +4,7 @@
 > Persistent, local memory for AI coding agents: Claude Code, Codex CLI, Cursor, any MCP client.
 > Temporal knowledge graph · procedural memory · AST codebase ingest · cross-project analogy · 3D WebGL visualization.
 
-[![Version](https://img.shields.io/badge/version-12.0.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
+[![Version](https://img.shields.io/badge/version-12.2.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
 [![Tests](https://img.shields.io/badge/tests-1769%20passing-4a9.svg)]()
 [![IDEs](https://img.shields.io/badge/IDEs-9%20supported-4a9.svg)]()
 [![LongMemEval R@5](https://img.shields.io/badge/LongMemEval%20R@5-96.2%25-4a9.svg)](evals/longmemeval-2026-04-17.json)
@@ -21,6 +21,24 @@
 [![Donate](https://img.shields.io/badge/PayPal-Donate-00457C.svg?logo=paypal&logoColor=white)](https://PayPal.Me/vbcherepanov)
 
 **Why this, not mem0 / Letta / Zep / Supermemory / Cognee?** → [docs/vs-competitors.md](docs/vs-competitors.md)
+
+---
+
+## v12.2.0 — v11 W3 dispatch fix + Codex env alignment (2026-05-24)
+
+Bugfix release. Four v11 W3 MCP tools — `memory_recall_iterative`,
+`memory_temporal_query`, `memory_entity_resolve`, `memory_consolidate_status` —
+were silently broken on `main`: the dispatcher forwarded an out-of-scope
+`args` symbol, the resulting `NameError` was swallowed by `call_tool`'s
+exception handler, and clients saw `"Error: name 'args' is not defined"`.
+Fix passes the per-call args, with regression coverage via
+`tests/test_v11_dispatch_args.py`.
+
+Also aligns the Codex installer env with the `.tam` memory layout
+(`TAM_MEMORY_DIR` canonical, `CLAUDE_MEMORY_DIR` kept as compatibility alias,
+`MEMORY_MODE=fast` default) and isolates install tests from real
+`launchctl` / `systemctl` / `XDG` directories. Full notes in
+[`CHANGELOG.md`](CHANGELOG.md#1220--2026-05-24--v11-w3-dispatch-fix--codex-env-alignment).
 
 ---
 
@@ -82,7 +100,7 @@ uvx total-agent-memory                                    # Python via uv (fast)
 pipx install total-agent-memory                           # Python via pipx (isolated)
 brew install vbcherepanov/tap/total-memory                # Homebrew (macOS / Linuxbrew)
 docker run -p 37737:37737 -v ~/.tam:/data \
-  ghcr.io/vbcherepanov/total-agent-memory:12.0.0          # Docker (multi-arch amd64+arm64)
+  ghcr.io/vbcherepanov/total-agent-memory:12.2.0          # Docker (multi-arch amd64+arm64)
 git clone https://github.com/vbcherepanov/total-agent-memory \
   ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh   # manual
 ```
@@ -91,7 +109,7 @@ The `npx` path also wires the MCP entry into the IDE you pass to `connect <ide>`
 `claude-code`, `codex`, `cursor`, `cline`, `continue`, `aider`, `windsurf`,
 `gemini-cli`, `opencode`.
 
-**Project URLs:** [totalmemory.dev](https://totalmemory.dev) · [PyPI](https://pypi.org/project/total-agent-memory/) · [npm](https://www.npmjs.com/package/total-agent-memory) · [Docker GHCR](https://ghcr.io/vbcherepanov/total-agent-memory) · [GitHub Release](https://github.com/vbcherepanov/total-agent-memory/releases/tag/v12.0.0)
+**Project URLs:** [totalmemory.dev](https://totalmemory.dev) · [PyPI](https://pypi.org/project/total-agent-memory/) · [npm](https://www.npmjs.com/package/total-agent-memory) · [Docker GHCR](https://ghcr.io/vbcherepanov/total-agent-memory) · [GitHub Release](https://github.com/vbcherepanov/total-agent-memory/releases/tag/v12.2.0)
 
 Full migration notes (Docker volume names kept for backward-compat, brew formula
 changes, etc.) live in [`CHANGELOG.md`](CHANGELOG.md). The historical sections
@@ -500,7 +518,7 @@ Full side-by-side with pricing, latency, accuracy, "when to pick each" → [docs
 
 ## Install
 
-### Quickstart — pick one (v12.0.0)
+### Quickstart — pick one (v12.2.0)
 
 | Channel | Command | What it does |
 |---|---|---|
@@ -508,7 +526,7 @@ Full side-by-side with pricing, latency, accuracy, "when to pick each" → [docs
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:12.0.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:12.2.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
 | **Manual clone** | `git clone https://github.com/vbcherepanov/total-agent-memory ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh --ide claude-code` | Full control. Lets you hack on the server, run benchmarks, and pick which background services to enable. Detailed walkthrough below. |
 
 All six channels land at the same MCP server. The `npx` and `./install.sh` paths
