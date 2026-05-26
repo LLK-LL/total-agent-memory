@@ -4357,6 +4357,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._handle_sse()
             return
 
+        # --- Liveness probe: always 200 if the dashboard process is up.
+        # Use this for Docker HEALTHCHECK / k8s livenessProbe — it does NOT
+        # depend on the database (fresh installs have an empty volume).
+        if path in ("/healthz", "/api/healthz"):
+            self._send_json({
+                "status": "ok",
+                "db_exists": DB_PATH.exists(),
+                "db_path": str(DB_PATH),
+                "port": DASHBOARD_PORT,
+            })
+            return
+
         # --- API routes require DB ---
         db = self._get_db()
         if db is None:

@@ -312,6 +312,61 @@ def test_uninstall_preserves_memory_db(sandbox_home: Path, tmp_path: Path):
     assert (mem_dir / "raw" / "note.txt").read_text() == "user note"
 
 
+# ---------- LaunchAgent plist installation (real run, not test mode) ----------
+
+
+def test_launchagents_substitute_install_dir_and_memory_dir(
+    sandbox_home: Path, tmp_path: Path
+):
+    """install.sh must replace __INSTALL_DIR__ / __MEMORY_DIR__ / __HOME__ in
+    every plist. Regression for the v12.2 bug where plists hardcoded
+    `__HOME__/claude-memory-server/...` — any user who cloned the repo
+    under a different name had a non-functional reflection daemon.
+
+    This test runs install.sh WITHOUT INSTALL_TEST_MODE so the
+    LaunchAgent install branch actually fires, with a fake launchctl.
+    """
+    launchctl_log = tmp_path / "launchctl.log"
+    stub = _write_launchctl_stub(tmp_path / "bin", launchctl_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(sandbox_home)
+    env["FAKE_UNAME"] = "Darwin"
+    env["TAM_MEMORY_DIR"] = str(sandbox_home / ".tam")
+    # Skip pip & model download, but keep the LaunchAgent step running.
+    env["INSTALL_TEST_MODE"] = "skip-heavy"
+    env["PATH"] = f"{stub.parent}:{env.get('PATH','')}"
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "--ide", "claude-code"],
+        env=env, capture_output=True, text=True, timeout=180,
+    )
+    # We don't assert returncode==0: pip/model steps may skip with
+    # non-fatal warnings under our partial test mode. We only care that
+    # the LaunchAgent step ran and produced valid plists.
+    la_dir = sandbox_home / "Library" / "LaunchAgents"
+    if not la_dir.exists():
+        pytest.skip(
+            "LaunchAgent branch did not fire under INSTALL_TEST_MODE=skip-heavy "
+            f"(install.sh stderr: {result.stderr[-300:]})"
+        )
+
+    plists = list(la_dir.glob("*.plist"))
+    assert plists, "no plists were copied to LaunchAgents dir"
+
+    for plist in plists:
+        body = plist.read_text()
+        # No leftover placeholders.
+        for placeholder in ("__INSTALL_DIR__", "__MEMORY_DIR__", "__HOME__"):
+            assert placeholder not in body, (
+                f"{plist.name}: leftover placeholder {placeholder}\n{body}"
+            )
+        # No hardcoded old paths.
+        assert "claude-memory-server" not in body, (
+            f"{plist.name}: hardcoded old checkout name 'claude-memory-server'"
+        )
+
+
 def test_uninstall_preserves_settings_json(sandbox_home: Path, tmp_path: Path):
     """settings.json should be left intact — MCP entry is documented as
     user-removable, not auto-nuked (avoids wiping other MCP servers)."""

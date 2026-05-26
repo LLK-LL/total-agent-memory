@@ -6833,21 +6833,116 @@ def _detect_git_branch():
         return ""
 
 
-async def main():
+async def _bootstrap_session():
+    """Common setup: build Store/Recall, start session, cleanup. Called
+    by every transport. Populates module globals."""
     global store, recall, SID, BRANCH
     store = Store()
     recall = Recall(store)
     SID = f"mcp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
     BRANCH = _detect_git_branch()
     store.session_start(SID, branch=BRANCH)
-    # Cleanup old observations on startup
     cleaned = store.cleanup_old_observations()
     if cleaned:
         LOG(f"Cleaned {cleaned} old observations (>{OBSERVATION_RETENTION_DAYS}d)")
     LOG(f"Session: {SID} | Branch: {BRANCH or '(none)'} | Memory: {MEMORY_DIR} | Sessions: {store.total_sessions()}")
     LOG(f"Config: decay={DECAY_HALF_LIFE}d archive={ARCHIVE_AFTER_DAYS}d purge={PURGE_AFTER_DAYS}d")
+
+
+async def _run_stdio():
+    """Default transport: read MCP frames from stdin/stdout. Used when
+    Claude Code / Codex / Cursor / any local MCP client spawns this
+    process via their config."""
     async with stdio_server() as (r, w):
         await app.run(r, w, app.create_initialization_options())
+
+
+async def _run_streamable_http(host: str, port: int):
+    """HTTP transport (MCP Streamable HTTP, spec 2025-03-26).
+
+    Exposes:
+      POST/GET/DELETE /mcp     — Streamable HTTP MCP frames
+      GET             /healthz — DB-independent liveness probe
+
+    Use case: long-lived container deployments (Docker, k8s) where the
+    MCP server runs as a daemon and clients (or sidecars) talk to it
+    over the network. Lives at /mcp so the same image can host the
+    dashboard on 37737 and MCP on 3737 without path conflicts.
+    """
+    import uvicorn
+    from contextlib import asynccontextmanager
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Mount, Route
+
+    # One manager per process — handles session multiplexing for many
+    # concurrent clients. ``stateless=False`` keeps short-lived sessions
+    # in memory, matching local-only deployments.
+    manager = StreamableHTTPSessionManager(
+        app=app,
+        event_store=None,
+        json_response=False,
+        stateless=False,
+    )
+
+    async def handle_mcp(scope, receive, send):
+        await manager.handle_request(scope, receive, send)
+
+    async def healthz(request: Request) -> Response:
+        return JSONResponse({
+            "status": "ok",
+            "transport": "streamable-http",
+            "session_id": SID,
+            "memory_dir": str(MEMORY_DIR),
+        })
+
+    @asynccontextmanager
+    async def lifespan(starlette_app):
+        # Start the session manager when uvicorn boots, stop it cleanly
+        # on SIGTERM — otherwise in-flight SSE streams leak.
+        async with manager.run():
+            yield
+
+    starlette_app = Starlette(
+        debug=False,
+        routes=[
+            Route("/healthz", healthz, methods=["GET"]),
+            Mount("/mcp", app=handle_mcp),
+        ],
+        lifespan=lifespan,
+    )
+
+    config = uvicorn.Config(
+        starlette_app,
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        # Drain in-flight requests for up to 5s before kill — matches
+        # Docker stop-grace defaults.
+        timeout_graceful_shutdown=5,
+    )
+    server = uvicorn.Server(config)
+    LOG(f"MCP HTTP transport listening on http://{host}:{port}/mcp (healthz: /healthz)")
+    await server.serve()
+
+
+async def main():
+    await _bootstrap_session()
+    transport = (os.environ.get("MCP_TRANSPORT", "stdio") or "stdio").lower().strip()
+    if transport in ("http", "streamable-http", "streamable_http"):
+        host = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
+        port = int(os.environ.get("MCP_HTTP_PORT", "3737"))
+        await _run_streamable_http(host, port)
+    elif transport == "stdio":
+        await _run_stdio()
+    else:
+        raise SystemExit(
+            f"Unknown MCP_TRANSPORT={transport!r}. "
+            f"Expected one of: stdio, http, streamable-http."
+        )
 
 
 if __name__ == "__main__":

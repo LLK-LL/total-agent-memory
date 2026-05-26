@@ -4,6 +4,134 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [12.4.0] — 2026-05-26 — 100% functional through every install path
+
+`npx connect`, `bash install.sh`, `docker run`, `docker compose up` — same
+4 services, same MCP HTTP API, same dashboard. No path is missing pieces
+anymore.
+
+### Added — MCP Streamable HTTP transport
+- `src/server.py` now supports `MCP_TRANSPORT=http` (also accepts
+  `streamable-http`). Boots a uvicorn ASGI app exposing:
+  - `POST/GET/DELETE /mcp` — MCP Streamable HTTP (spec 2025-03-26)
+  - `GET /healthz` — DB-independent liveness probe
+- Same `Server` instance powers both stdio and HTTP, so all 60+ MCP tools
+  are reachable over the network — IDEs, sidecars, k8s pods can all
+  connect without a stdio bridge.
+- ``stateless=False`` keeps in-process session multiplexing; clean
+  SIGTERM via uvicorn's `timeout_graceful_shutdown=5` matches Docker
+  stop-grace.
+
+### Added — scheduler service (cron-style)
+- `docker/scheduler_daemon.py` — stdlib-only scheduler that runs
+  `orphan-backfill` 4×/day and `check-updates` weekly inside the same
+  image. Replaces the `mcuadros/ofelia` external container and its
+  Docker-socket mount.
+- npm wrapper 1.3.0 ships matching scheduler services on macOS
+  (`StartCalendarInterval`) and Linux (`OnCalendar` systemd timers).
+
+### Added — full single-image stack
+- `tam-entrypoint` shim routes `docker run … mcp|dashboard|reflection|scheduler|all`
+  through the supervisor.
+- Default `TAM_SUPERVISOR_SERVICES=mcp,dashboard,reflection,scheduler`
+  → `docker run -p 3737:3737 -p 37737:37737 -v vol:/data ghcr.io/.../total-agent-memory`
+  brings the whole product up with one command.
+- `EXPOSE 3737 37737`; HEALTHCHECK probes both `/healthz` endpoints.
+- ML caches pinned to the data volume (`HF_HOME`, `TRANSFORMERS_CACHE`,
+  `TORCHINDUCTOR_CACHE_DIR`) — prevents torch._dynamo from crashing on
+  containers with tmpfs `/tmp` < 100 MB.
+- Default `OLLAMA_URL=http://host.docker.internal:11434` — single-image
+  finds host Ollama out of the box on Docker Desktop / Windows / WSL2.
+  Graceful degradation to FTS+embeddings if Ollama unreachable.
+
+### Added (v12.3 carry-over — never tagged separately)
+- `docker/tam_supervisor.py` — stdlib supervisor (prefix logging,
+  exponential-backoff restarts, signal propagation).
+- `/healthz` endpoint on the dashboard.
+- Auto-initialise `memory.db` on first boot inside the container.
+- `launchagents/com.total-agent-memory.dashboard.plist` (installed by
+  `install.sh` on macOS).
+- `.github/workflows/docker.yml` — multi-arch (amd64+arm64) build+push
+  to ghcr on every git tag, with `/healthz` + `/api/stats` + docker
+  healthcheck smoke before publish.
+- `.github/workflows/smoke.yml` — install-matrix smoke on every PR.
+- `tests/smoke/install-docker-pull.sh`, `tests/smoke/install-sh-macos.sh`.
+- Plist placeholders unified to `__INSTALL_DIR__` / `__MEMORY_DIR__` /
+  `__HOME__`. Old plists hardcoded `__HOME__/claude-memory-server/...`,
+  breaking clones with any other directory name.
+
+### Changed
+- `docker-compose.yml` `mcp` service is back (was removed in v12.3 when
+  HTTP transport didn't exist). Same image as `dashboard`/`reflection`,
+  `command: ["mcp"]`.
+- `scheduler` compose service now runs in the main image
+  (`command: ["scheduler"]`) instead of `mcuadros/ofelia` — no more
+  Docker socket mount in the stack.
+- `install.sh` Step 5 (old `dashboard-service.sh install` call) removed
+  — it created a `com.claude-total-memory.dashboard` plist that fought
+  the canonical `com.total-agent-memory.dashboard` plist for port 37737.
+
+### Fixed
+- `bash install.sh` under any clone name now writes valid plist/unit
+  paths instead of references to a non-existent `~/claude-memory-server/`.
+- `bash install.sh --uninstall` cleans up the new dashboard plist too.
+
+## [12.3.0] — never tagged — folded into 12.4.0
+
+The 1.1.0 npm wrapper, `docker pull`, and certain `git clone` layouts all
+left users with a non-functional web dashboard despite the module being
+present in the package. v12.3 closes those gaps end-to-end.
+
+### Added
+- `docker/tam_supervisor.py` — single-container supervisor (~150 LOC,
+  stdlib only) that runs dashboard + reflection together with prefix
+  logging, exponential-backoff restarts, and clean SIGTERM propagation.
+  Makes `docker run ghcr.io/.../total-agent-memory` give a working
+  dashboard with one command.
+- `tam-entrypoint` shim in the image — routes `docker run … mcp|dashboard|reflection|all`
+  through the supervisor so compose services and single-image use share
+  a single CMD shape.
+- `/healthz` endpoint on the dashboard — DB-independent liveness probe
+  suitable for Docker `HEALTHCHECK` and Kubernetes `livenessProbe`. Fresh
+  volumes no longer report unhealthy until the first save.
+- Auto-initialise `memory.db` on first boot in the supervisor.
+- `launchagents/com.total-agent-memory.dashboard.plist` — keeps the
+  dashboard running and restarts on crash. Installed automatically by
+  `install.sh` on macOS.
+- `.github/workflows/docker.yml` — build + push multi-arch
+  (`amd64`, `arm64`) ghcr images on every git tag, with `/healthz` +
+  `/api/stats` + Docker healthcheck smoke before publish. Tags produced:
+  `:X.Y.Z`, `:X.Y`, `:X`, `:latest`.
+- `.github/workflows/smoke.yml` — runs install-matrix smoke on every PR.
+- `tests/smoke/install-docker-pull.sh` + `tests/smoke/install-sh-macos.sh`
+  — black-box end-to-end install verifiers.
+
+### Changed
+- `install.sh` Step 5 (the old `dashboard-service.sh install` call)
+  removed — it created a `com.claude-total-memory.dashboard` plist that
+  fought the canonical `com.total-agent-memory.dashboard` plist for
+  port 37737. One always ended up in crash-loop.
+- Plist placeholders unified to `__INSTALL_DIR__` / `__MEMORY_DIR__` /
+  `__HOME__`. Old plists hardcoded `__HOME__/claude-memory-server/...`,
+  breaking any clone whose directory name wasn't `claude-memory-server`
+  — the common case after the rebrand.
+- Dockerfile `CMD` switched to the supervisor; `EXPOSE` narrowed to
+  `37737` (the MCP HTTP port 3737 was never functional — see Known Issues).
+- `docker-compose.yml` `mcp` service removed — `MCP_TRANSPORT=http` was
+  silently ignored by `src/server.py` (stdio-only). For MCP, use
+  `docker/run-mcp.sh` (stdio bridge). HTTP transport lands in v12.4.
+
+### Fixed
+- `bash install.sh` under any clone name now writes valid plist/unit
+  paths instead of references to a non-existent `~/claude-memory-server/`.
+- `bash install.sh --uninstall` cleans up the new dashboard plist too.
+- New regression test `test_launchagents_substitute_install_dir_and_memory_dir`
+  guards against placeholder leakage.
+
+### Known issues
+- MCP server is still stdio-only inside the Docker image — connect via
+  `docker/run-mcp.sh`. Streamable HTTP transport is tracked for v12.4.
+
 ## [12.2.0] — 2026-05-24 — v11 W3 dispatch fix + Codex env alignment
 
 Bugfix release that restores four previously-broken v11 W3 MCP tools and

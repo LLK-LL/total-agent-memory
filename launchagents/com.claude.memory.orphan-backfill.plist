@@ -7,8 +7,8 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>__HOME__/claude-memory-server/.venv/bin/python</string>
-    <string>__HOME__/claude-memory-server/src/tools/backfill_orphan_edges.py</string>
+    <string>__INSTALL_DIR__/.venv/bin/python</string>
+    <string>__INSTALL_DIR__/src/tools/backfill_orphan_edges.py</string>
     <string>--min-mentions=1</string>
     <string>--limit=500</string>
     <string>--trigger-now</string>
@@ -58,13 +58,13 @@
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin</string>
     <key>CLAUDE_MEMORY_DIR</key>
-    <string>__HOME__/.claude-memory</string>
+    <string>__MEMORY_DIR__</string>
     <key>MEMORY_LLM_MODEL</key>
     <string>qwen2.5-coder:7b</string>
   </dict>
 
   <key>WorkingDirectory</key>
-  <string>__HOME__/claude-memory-server</string>
+  <string>__INSTALL_DIR__</string>
 
   <key>StandardOutPath</key>
   <string>/tmp/claude-memory-orphan-backfill.log</string>

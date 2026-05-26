@@ -7,8 +7,8 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>__HOME__/claude-memory-server/.venv/bin/python</string>
-    <string>__HOME__/claude-memory-server/src/tools/run_reflection.py</string>
+    <string>__INSTALL_DIR__/.venv/bin/python</string>
+    <string>__INSTALL_DIR__/src/tools/run_reflection.py</string>
     <string>--scope=auto</string>
   </array>
 
@@ -19,7 +19,7 @@
   <!-- Fire IMMEDIATELY when memory_save touches the trigger file -->
   <key>WatchPaths</key>
   <array>
-    <string>__HOME__/.claude-memory/.reflect-pending</string>
+    <string>__MEMORY_DIR__/.reflect-pending</string>
   </array>
 
   <!-- Don't run at load (avoid double-run on startup) -->
@@ -41,8 +41,10 @@
   <dict>
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin</string>
+    <key>TAM_MEMORY_DIR</key>
+    <string>__MEMORY_DIR__</string>
     <key>CLAUDE_MEMORY_DIR</key>
-    <string>__HOME__/.claude-memory</string>
+    <string>__MEMORY_DIR__</string>
     <key>MEMORY_LLM_MODEL</key>
     <string>qwen2.5-coder:7b</string>
     <key>REFLECT_DEBOUNCE_SEC</key>
@@ -50,11 +52,11 @@
   </dict>
 
   <key>WorkingDirectory</key>
-  <string>__HOME__/claude-memory-server</string>
+  <string>__INSTALL_DIR__</string>
 
   <key>StandardOutPath</key>
-  <string>/tmp/claude-memory-reflection.log</string>
+  <string>__MEMORY_DIR__/logs/reflection.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/claude-memory-reflection.log</string>
+  <string>__MEMORY_DIR__/logs/reflection.err</string>
 </dict>
 </plist>

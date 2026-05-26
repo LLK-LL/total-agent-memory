@@ -880,24 +880,27 @@ else
     echo "  Set MEMORY_LLM_ENABLED=auto after Ollama is ready — it picks up automatically."
 fi
 
-# -- 5. Dashboard service --
-if [ "$TEST_MODE" = "1" ]; then
-    echo "-> Step 5: SKIP (test mode) dashboard service"
-else
-    echo "-> Step 5: Setting up dashboard service..."
-    "$DASHBOARD_SERVICE" install "$PY_PATH" "$INSTALL_DIR" "$MEMORY_DIR"
-fi
-
-# -- 5b. Optional background agents --
-# macOS: LaunchAgents. Linux: systemd --user. Both only for claude-code IDE.
+# -- 5. Background services (dashboard + reflection + orphan-backfill + check-updates) --
+# Step 5 (old `dashboard-service.sh install`) was removed in v12.3 — it
+# created a `com.claude-total-memory.dashboard` plist that conflicted with
+# the canonical `com.total-agent-memory.dashboard.plist` shipped under
+# launchagents/. Both fought for port 37737. dashboard-service.sh remains
+# in scripts/ for manual use but isn't invoked automatically anymore.
 if [ "$TEST_MODE" != "1" ] && [ "$IDE" = "claude-code" ] && [ "$OS_NAME" = "Darwin" ] && [ -d "$INSTALL_DIR/launchagents" ]; then
-    echo "-> Step 5b: Installing background LaunchAgents (reflection, orphan-backfill, check-updates)..."
+    echo "-> Step 5: Installing background LaunchAgents (dashboard, reflection, orphan-backfill, check-updates)..."
     LA_DIR="$HOME/Library/LaunchAgents"
     mkdir -p "$LA_DIR"
+    mkdir -p "$MEMORY_DIR/logs"
     for TPL in "$INSTALL_DIR"/launchagents/*.plist; do
         NAME=$(basename "$TPL")
         DEST="$LA_DIR/$NAME"
-        sed "s|__HOME__|$HOME|g" "$TPL" > "$DEST"
+        # Substitute placeholders so plists work regardless of git checkout
+        # name (used to hardcode `claude-memory-server`) and memory dir
+        # (used to hardcode `~/.claude-memory` instead of `~/.tam`).
+        sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
+            -e "s|__MEMORY_DIR__|$MEMORY_DIR|g" \
+            -e "s|__HOME__|$HOME|g" \
+            "$TPL" > "$DEST"
         LABEL=$(basename "$NAME" .plist)
         launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
         launchctl bootstrap "gui/$(id -u)" "$DEST" 2>/dev/null || \
@@ -905,7 +908,7 @@ if [ "$TEST_MODE" != "1" ] && [ "$IDE" = "claude-code" ] && [ "$OS_NAME" = "Darw
     done
     echo "  OK: Background agents installed"
 elif [ "$IDE" = "claude-code" ] && [ "$OS_NAME" = "Linux" ] && [ -d "$INSTALL_DIR/systemd" ]; then
-    echo "-> Step 5b: Installing background systemd --user services (reflection, dashboard, orphan-backfill, check-updates)..."
+    echo "-> Step 5: Installing background systemd --user services (reflection, dashboard, orphan-backfill, check-updates)..."
     install_systemd_user_services
 fi
 

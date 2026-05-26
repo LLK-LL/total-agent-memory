@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.total-agent-memory.dashboard</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__INSTALL_DIR__/.venv/bin/python</string>
+    <string>__INSTALL_DIR__/src/dashboard.py</string>
+  </array>
+
+  <!-- Long-running HTTP server: start on boot, restart on crash. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin</string>
+    <key>TAM_MEMORY_DIR</key>
+    <string>__MEMORY_DIR__</string>
+    <key>CLAUDE_MEMORY_DIR</key>
+    <string>__MEMORY_DIR__</string>
+    <key>DASHBOARD_PORT</key>
+    <string>37737</string>
+    <key>DASHBOARD_BIND</key>
+    <string>127.0.0.1</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__INSTALL_DIR__</string>
+
+  <key>StandardOutPath</key>
+  <string>__MEMORY_DIR__/logs/dashboard.log</string>
+  <key>StandardErrorPath</key>
+  <string>__MEMORY_DIR__/logs/dashboard.err</string>
+</dict>
+</plist>
