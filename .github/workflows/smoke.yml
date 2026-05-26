@@ -28,19 +28,19 @@ jobs:
         run: bash tests/smoke/install-docker-pull.sh
 
   install-sh-linux:
+    # Native ubuntu runner — its checkout uses local git, avoiding the
+    # REST-API code path that triggers GitHub's actions-abuse detection
+    # on containerised jobs.
     runs-on: ubuntu-latest
-    container:
-      image: python:3.12-slim
     steps:
       - uses: actions/checkout@v4
-      - name: install deps
-        run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends bash git curl >/dev/null
-      - name: bash install.sh inside container → unit files staged
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: bash install.sh on bare ubuntu → unit files staged
         env:
           INSTALL_TEST_MODE: skip-heavy
-          TAM_MEMORY_DIR: /root/.tam
+          TAM_MEMORY_DIR: ${{ github.workspace }}/.tam
         run: |
           bash install.sh --ide cursor 2>&1 | tail -20 || true
           for u in tam-dashboard.service tam-reflection.service tam-reflection.path; do
