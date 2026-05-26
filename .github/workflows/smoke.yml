@@ -42,8 +42,10 @@ jobs:
           INSTALL_TEST_MODE: skip-heavy
           TAM_MEMORY_DIR: ${{ github.workspace }}/.tam
         run: |
-          bash install.sh --ide cursor 2>&1 | tail -20 || true
-          for u in tam-dashboard.service tam-reflection.service tam-reflection.path; do
+          # --ide claude-code is the only IDE that triggers the Step 5
+          # systemd-units branch — cursor/cline/etc. wire MCP only.
+          bash install.sh --ide claude-code 2>&1 | tail -25 || true
+          for u in claude-memory-dashboard.service claude-memory-reflection.service claude-memory-reflection.path; do
             f="$HOME/.config/systemd/user/$u"
             test -f "$f" || { echo "FAIL: $u not staged"; exit 1; }
             grep -q '@INSTALL_DIR@\|@MEMORY_DIR@\|__HOME__' "$f" \
