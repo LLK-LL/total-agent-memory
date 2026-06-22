@@ -13,6 +13,7 @@ only exposes pure functions. Ollama is the default LLM.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -161,6 +162,70 @@ def _truncate(text: str) -> str:
     return text if len(text) <= MAX_LLM_INPUT_CHARS else text[:MAX_LLM_INPUT_CHARS]
 
 
+def _squash_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _first_sentence_or_chunk(text: str, limit: int = 240) -> str:
+    text = _squash_ws(text)
+    if len(text) <= limit:
+        return text
+    match = re.search(r"(?<=[.!?])\s+", text)
+    if match and match.end() <= limit:
+        return text[:match.start() + 1].strip()
+    return text[:limit].rstrip() + "..."
+
+
+def _keyword_fallback(text: str, limit: int = 10) -> str:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_+\-./]{2,}|[\u4e00-\u9fff]{2,}", text or "")
+    seen: set[str] = set()
+    out: list[str] = []
+    for word in words:
+        key = word.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(word)
+        if len(out) >= limit:
+            break
+    return ", ".join(out)
+
+
+def _deterministic_compress(text: str, limit: int = 1200) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    if re.search(r"```|^#{1,6}\s+|^\s*(?:[-*+]|\d+\.)\s+\S|https?://|`[^`]+`", text, re.MULTILINE):
+        return text
+    lines = [line.rstrip() for line in text.splitlines()]
+    kept: list[str] = []
+    char_count = 0
+    for line in lines:
+        stripped = line.strip()
+        keep = (
+            not stripped
+            or stripped.startswith("#")
+            or stripped.startswith(("```", "-", "*", "+"))
+            or bool(re.search(r"https?://|`[^`]+`|[A-Za-z]:\\|/[\w.-]+/", stripped))
+        )
+        if keep or char_count < limit:
+            kept.append(line)
+            char_count += len(line) + 1
+        if char_count >= limit and kept and kept[-1].strip():
+            break
+    compressed = "\n".join(kept).strip()
+    return compressed if compressed else text[:limit].rstrip() + "..."
+
+
+def _fallback_representations(content: str) -> dict[str, str]:
+    return {
+        "summary": _first_sentence_or_chunk(content),
+        "keywords": _keyword_fallback(content),
+        "questions": "",
+        "compressed": _deterministic_compress(content),
+    }
+
+
 def generate_representations(
     content: str,
     project: str | None = None,
@@ -186,7 +251,7 @@ def generate_representations(
     try:
         from config import has_llm
         if not has_llm("repr"):
-            return out
+            return _fallback_representations(content)
     except Exception:
         pass  # config module not importable — proceed and let LLM calls fail-soft
 

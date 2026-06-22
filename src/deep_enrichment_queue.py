@@ -47,7 +47,31 @@ class DeepEnrichmentQueue:
         self.db.commit()
         return True
 
+    def reclaim_stale(self, stale_minutes: int = 30) -> int:
+        stale_expr = f"-{int(stale_minutes)} minutes"
+        deleted = self.db.execute(
+            "DELETE FROM deep_enrichment_queue "
+            "WHERE status='processing' "
+            "AND claimed_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?) "
+            "AND EXISTS ("
+            "  SELECT 1 FROM deep_enrichment_queue AS pending "
+            "  WHERE pending.knowledge_id = deep_enrichment_queue.knowledge_id "
+            "  AND pending.status = 'pending'"
+            ")",
+            (stale_expr,),
+        ).rowcount or 0
+        updated = self.db.execute(
+            "UPDATE deep_enrichment_queue "
+            "SET status='pending', claimed_at=NULL "
+            "WHERE status='processing' "
+            "AND claimed_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+            (stale_expr,),
+        ).rowcount or 0
+        self.db.commit()
+        return deleted + updated
+
     def claim_next(self) -> dict | None:
+        self.reclaim_stale()
         row = self.db.execute(
             "SELECT id, knowledge_id, attempts FROM deep_enrichment_queue "
             "WHERE status = 'pending' ORDER BY id ASC LIMIT 1"

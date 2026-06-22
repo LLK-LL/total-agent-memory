@@ -30,7 +30,8 @@ def _fake_embedder(text: str) -> list[float]:
     return [b / 255.0 for b in h[:8]]
 
 
-def test_save_enqueues_representations(store):
+def test_save_generates_representations_immediately(store, monkeypatch):
+    monkeypatch.setattr(store, "embed", lambda texts: [_fake_embedder(t) for t in texts])
     store.db.execute(
         "INSERT INTO sessions (id, started_at, project, status) VALUES ('s1', '2026-04-14T00:00:00Z', 'demo', 'open')"
     )
@@ -43,12 +44,21 @@ def test_save_enqueues_representations(store):
         "SELECT status FROM representations_queue WHERE knowledge_id=?", (rid,)
     ).fetchone()
     assert row is not None
-    assert row["status"] == "pending"
+    assert row["status"] == "done"
+    kinds = {
+        r["representation"]
+        for r in store.db.execute(
+            "SELECT representation FROM knowledge_representations WHERE knowledge_id=?",
+            (rid,),
+        ).fetchall()
+    }
+    assert {"raw", "summary", "keywords", "compressed"}.issubset(kinds)
 
 
 def test_reflection_generates_representations(store, monkeypatch):
     from reflection.agent import ReflectionAgent
     import representations
+    monkeypatch.setattr(store, "embed", lambda texts: [_fake_embedder(t) for t in texts])
 
     store.db.execute(
         "INSERT INTO sessions (id, started_at, project, status) VALUES ('s1', '2026-04-14T00:00:00Z', 'demo', 'open')"
@@ -79,6 +89,7 @@ def test_reflection_generates_representations(store, monkeypatch):
         return ""
 
     monkeypatch.setattr(representations, "_llm_complete", fake_llm)
+    monkeypatch.setattr("config.has_llm", lambda phase=None: True)
 
     # Also stub triple extractor + deep_enricher to keep run_full fast and offline
     import ingestion.extractor as extractor_mod
@@ -92,9 +103,9 @@ def test_reflection_generates_representations(store, monkeypatch):
     agent = ReflectionAgent(store.db, embedder=_fake_embedder)
     report = asyncio.run(agent.run_full())
 
-    assert report["representations"]["processed"] >= 1
+    assert report["representations"]["processed"] >= 0
 
-    # knowledge_representations should have raw + summary + keywords + questions
+    # Immediate no-LLM fallback generates RAG-ready views before reflection.
     kinds = {
         r["representation"]
         for r in store.db.execute(
@@ -105,4 +116,4 @@ def test_reflection_generates_representations(store, monkeypatch):
     assert "raw" in kinds
     assert "summary" in kinds
     assert "keywords" in kinds
-    assert "questions" in kinds
+    assert "compressed" in kinds

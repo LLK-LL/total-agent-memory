@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ def repq_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -24,8 +25,8 @@ def repq_db():
         );
         """
     )
-    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text())
-    conn.executescript((root / "migrations" / "005_representations_queue.sql").read_text())
+    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text(encoding="utf-8"))
+    conn.executescript((root / "migrations" / "005_representations_queue.sql").read_text(encoding="utf-8"))
     yield conn
     conn.close()
 
@@ -138,6 +139,53 @@ def test_process_handles_generator_crash(repq_db):
     ).fetchone()
     # Retryable
     assert row["status"] == "pending"
+
+
+def test_reclaim_stale_processing_returns_to_pending(repq_db):
+    from representations_queue import RepresentationsQueue
+
+    q = RepresentationsQueue(repq_db)
+    kid = _add(repq_db, "doc")
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    repq_db.execute(
+        "INSERT INTO representations_queue "
+        "(knowledge_id, status, created_at, claimed_at) VALUES (?, 'processing', ?, ?)",
+        (kid, old, old),
+    )
+    repq_db.commit()
+
+    assert q.reclaim_stale(stale_minutes=30) == 1
+    row = repq_db.execute(
+        "SELECT status, claimed_at FROM representations_queue WHERE knowledge_id=?", (kid,)
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["claimed_at"] is None
+
+
+def test_reclaim_stale_processing_dedupes_existing_pending(repq_db):
+    from representations_queue import RepresentationsQueue
+
+    q = RepresentationsQueue(repq_db)
+    kid = _add(repq_db, "doc")
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    repq_db.execute(
+        "INSERT INTO representations_queue "
+        "(knowledge_id, status, created_at, claimed_at) VALUES (?, 'processing', ?, ?)",
+        (kid, old, old),
+    )
+    repq_db.execute(
+        "INSERT INTO representations_queue "
+        "(knowledge_id, status, created_at) VALUES (?, 'pending', ?)",
+        (kid, now),
+    )
+    repq_db.commit()
+
+    assert q.reclaim_stale(stale_minutes=30) == 1
+    rows = repq_db.execute(
+        "SELECT status FROM representations_queue WHERE knowledge_id=?", (kid,)
+    ).fetchall()
+    assert [r["status"] for r in rows] == ["pending"]
 
 
 def test_stats(repq_db):

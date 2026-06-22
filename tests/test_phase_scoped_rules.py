@@ -102,6 +102,33 @@ def test_self_rules_context_plan_excludes_build_rules(store):
     assert "build only" not in contents
 
 
+def test_self_rules_context_compact_omits_metadata(store):
+    _add_rule(store, "compact core", tags=["phase:build"])
+
+    r = store.get_rules_for_context(project="myproj", phase="build", detail="compact")
+
+    assert r["detail"] == "compact"
+    assert r["rules_count"] == 1
+    [rule] = r["rules"]
+    assert set(rule) == {"id", "content", "category", "priority", "detail_available"}
+    assert rule["content"] == "compact core"
+    assert rule["detail_available"] is False
+    assert "fire_count" not in rule
+    assert "created_at" not in rule
+
+
+def test_self_rules_context_compact_truncates_long_rules(store):
+    long_rule = "x" * 220
+    _add_rule(store, long_rule, tags=["phase:build"])
+
+    r = store.get_rules_for_context(project="myproj", phase="build", detail="compact")
+
+    [rule] = r["rules"]
+    assert len(rule["content"]) < len(long_rule)
+    assert rule["content"].endswith("...")
+    assert rule["detail_available"] is True
+
+
 def test_self_rules_context_unknown_phase_raises(store):
     """Unknown phase returns an error payload with hint."""
     _add_rule(store, "core")
@@ -197,9 +224,9 @@ def test_phase_transition_adds_rules_preview_in_response():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     mig = Path(__file__).parent.parent / "migrations" / "012_task_phases.sql"
-    conn.executescript(mig.read_text())
+    conn.executescript(mig.read_text(encoding="utf-8"))
     proc = Path(__file__).parent.parent / "migrations" / "009_procedural.sql"
-    conn.executescript(proc.read_text())
+    conn.executescript(proc.read_text(encoding="utf-8"))
 
     tp = TaskPhases(conn)
     tp.create_task("t-preview", "add /users endpoint", level=2)

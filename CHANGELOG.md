@@ -4,6 +4,23 @@ All notable changes to total-agent-memory are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and versions use [Semantic Versioning](https://semver.org/).
 
+## [12.5.0] - 2026-06-22 - Memory graph visualization
+
+### Added
+- Local Cytoscape.js memory graph viewer export:
+  `src/tools/memory_graph_viewer_export.py`.
+- Static 2D and 3D viewer assets under
+  `src/tools/memory_graph_viewer_assets/`.
+- Tests for read-only graph loading, orphan-edge filtering, knowledge-node
+  summaries, asset copying, and export limits.
+- Release notes at `docs/v12.5.0-memory-graph-viewer.md` documenting the
+  new visualization feature and privacy boundary.
+
+### Privacy
+- Release includes only system files. Live memory databases, WAL/SHM files,
+  logs, transcripts, raw captures, backups, and generated private exports
+  remain excluded from Git.
+
 ## [12.4.0] — 2026-05-26 — 100% functional through every install path
 
 `npx connect`, `bash install.sh`, `docker run`, `docker compose up` — same

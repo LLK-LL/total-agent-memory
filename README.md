@@ -4,7 +4,7 @@
 > Persistent, local memory for AI coding agents: Claude Code, Codex CLI, Cursor, any MCP client.
 > Temporal knowledge graph · procedural memory · AST codebase ingest · cross-project analogy · 3D WebGL visualization.
 
-[![Version](https://img.shields.io/badge/version-12.2.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
+[![Version](https://img.shields.io/badge/version-12.5.0-8ad.svg)](https://pypi.org/project/total-agent-memory/)
 [![Tests](https://img.shields.io/badge/tests-1769%20passing-4a9.svg)]()
 [![IDEs](https://img.shields.io/badge/IDEs-9%20supported-4a9.svg)]()
 [![LongMemEval R@5](https://img.shields.io/badge/LongMemEval%20R@5-96.2%25-4a9.svg)](evals/longmemeval-2026-04-17.json)
@@ -24,22 +24,25 @@
 
 ---
 
-## v12.2.0 — v11 W3 dispatch fix + Codex env alignment (2026-05-24)
+## v12.5.0 - Memory graph visualization (2026-06-22)
 
-Bugfix release. Four v11 W3 MCP tools — `memory_recall_iterative`,
-`memory_temporal_query`, `memory_entity_resolve`, `memory_consolidate_status` —
-were silently broken on `main`: the dispatcher forwarded an out-of-scope
-`args` symbol, the resulting `NameError` was swallowed by `call_tool`'s
-exception handler, and clients saw `"Error: name 'args' is not defined"`.
-Fix passes the per-call args, with regression coverage via
-`tests/test_v11_dispatch_args.py`.
+This release adds a local Cytoscape.js memory graph viewer export. It turns the
+existing graph tables into a static browser workspace with 2D and 3D views, node
+type counts, weighted edges, and linked knowledge summaries.
 
-Also aligns the Codex installer env with the `.tam` memory layout
-(`TAM_MEMORY_DIR` canonical, `CLAUDE_MEMORY_DIR` kept as compatibility alias,
-`MEMORY_MODE=fast` default) and isolates install tests from real
-`launchctl` / `systemctl` / `XDG` directories. Full notes in
-[`CHANGELOG.md`](CHANGELOG.md#1220--2026-05-24--v11-w3-dispatch-fix--codex-env-alignment).
+The export tool opens the SQLite memory database in read-only mode and writes
+viewer files only to the output directory you choose. The repository release
+contains system files only; live memory databases, logs, transcripts, raw
+captures, backups, and generated private graph exports stay out of Git.
 
+```bash
+python src/tools/memory_graph_viewer_export.py --output /tmp/tam-graph-viewer
+```
+
+Open `index.html` from the output directory. Use `--max-nodes`, `--max-edges`,
+and `--min-edge-weight` when a large graph needs a smaller browser-friendly
+view. Full notes in
+[`docs/v12.5.0-memory-graph-viewer.md`](docs/v12.5.0-memory-graph-viewer.md).
 ---
 
 ## v12.1.0 — Claude Code v2.1.145 subagent lineage (2026-05-20)
@@ -100,7 +103,7 @@ uvx total-agent-memory                                    # Python via uv (fast)
 pipx install total-agent-memory                           # Python via pipx (isolated)
 brew install vbcherepanov/tap/total-memory                # Homebrew (macOS / Linuxbrew)
 docker run -p 37737:37737 -v ~/.tam:/data \
-  ghcr.io/vbcherepanov/total-agent-memory:12.2.0          # Docker (multi-arch amd64+arm64)
+  ghcr.io/vbcherepanov/total-agent-memory:12.5.0          # Docker (multi-arch amd64+arm64)
 git clone https://github.com/vbcherepanov/total-agent-memory \
   ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh   # manual
 ```
@@ -109,7 +112,7 @@ The `npx` path also wires the MCP entry into the IDE you pass to `connect <ide>`
 `claude-code`, `codex`, `cursor`, `cline`, `continue`, `aider`, `windsurf`,
 `gemini-cli`, `opencode`.
 
-**Project URLs:** [totalmemory.dev](https://totalmemory.dev) · [PyPI](https://pypi.org/project/total-agent-memory/) · [npm](https://www.npmjs.com/package/total-agent-memory) · [Docker GHCR](https://ghcr.io/vbcherepanov/total-agent-memory) · [GitHub Release](https://github.com/vbcherepanov/total-agent-memory/releases/tag/v12.2.0)
+**Project URLs:** [totalmemory.dev](https://totalmemory.dev) · [PyPI](https://pypi.org/project/total-agent-memory/) · [npm](https://www.npmjs.com/package/total-agent-memory) · [Docker GHCR](https://ghcr.io/vbcherepanov/total-agent-memory) · [GitHub Release](https://github.com/vbcherepanov/total-agent-memory/releases/tag/v12.5.0)
 
 Full migration notes (Docker volume names kept for backward-compat, brew formula
 changes, etc.) live in [`CHANGELOG.md`](CHANGELOG.md). The historical sections
@@ -518,7 +521,7 @@ Full side-by-side with pricing, latency, accuracy, "when to pick each" → [docs
 
 ## Install
 
-### Quickstart — pick one (v12.2.0)
+### Quickstart — pick one (v12.5.0)
 
 | Channel | Command | What it does |
 |---|---|---|
@@ -526,7 +529,7 @@ Full side-by-side with pricing, latency, accuracy, "when to pick each" → [docs
 | **uvx** (Python via uv) | `uvx total-agent-memory` | One-off run with no install. Best for trying without commitment. |
 | **pipx** (Python isolated) | `pipx install total-agent-memory` | Installs the `total-agent-memory`, `tam`, `tam-lookup`, `lookup-memory` binaries on PATH in an isolated venv. |
 | **brew** (macOS / Linuxbrew) | `brew install vbcherepanov/tap/total-memory` | Bottle-style install with `tam` and legacy `claude-total-memory` symlinks. |
-| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:12.2.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
+| **Docker** (multi-arch) | `docker run -p 37737:37737 -v ~/.tam:/data ghcr.io/vbcherepanov/total-agent-memory:12.5.0` | Containerized (linux/amd64 + linux/arm64). Dashboard on `:37737`. |
 | **Manual clone** | `git clone https://github.com/vbcherepanov/total-agent-memory ~/total-agent-memory && cd ~/total-agent-memory && ./install.sh --ide claude-code` | Full control. Lets you hack on the server, run benchmarks, and pick which background services to enable. Detailed walkthrough below. |
 
 All six channels land at the same MCP server. The `npx` and `./install.sh` paths

@@ -16,12 +16,48 @@ versus ``detail='full'`` on the same ``limit``.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 
 # ── index mode ────────────────────────────────────────────────
 
 _TITLE_MAX = 80
+_RAG_SUMMARY_MAX = 220
+_RAG_DEDUPE_MAX = 180
+
+_FAILURE_TERMS = (
+    "bug",
+    "error",
+    "fail",
+    "failure",
+    "failed",
+    "fix",
+    "regression",
+    "wrong",
+    "mistake",
+    "pitfall",
+    "踩坑",
+    "失败",
+    "错误",
+    "报错",
+    "修复",
+    "质疑",
+    "修改",
+)
+
+_PREFERENCE_TERMS = (
+    "preference",
+    "preferences",
+    "user preference",
+    "user preferences",
+    "prefer",
+    "prefers",
+    "qr",
+    "偏好",
+    "用户偏好",
+)
 
 
 def _first_line(content: str, limit: int = _TITLE_MAX) -> str:
@@ -102,6 +138,228 @@ def index_response(search_result: dict[str, Any]) -> dict[str, Any]:
         if key in search_result:
             out[key] = search_result[key]
     return out
+
+
+# --- RAG mode ---------------------------------------------------------------
+
+
+def _parse_tags(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(t) for t in raw]
+    if isinstance(raw, str):
+        try:
+            loaded = json.loads(raw)
+        except Exception:
+            return [raw] if raw else []
+        if isinstance(loaded, list):
+            return [str(t) for t in loaded]
+        return [str(loaded)]
+    return [str(raw)]
+
+
+def _flat_hits(search_result: dict[str, Any]) -> list[dict[str, Any]]:
+    flat: list[dict[str, Any]] = []
+    grouped = search_result.get("results") or {}
+    if isinstance(grouped, dict):
+        for group in grouped.values():
+            if isinstance(group, list):
+                flat.extend(i for i in group if isinstance(i, dict))
+    return flat
+
+
+def _normalise_for_dedupe(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+    return text[:_RAG_DEDUPE_MAX]
+
+
+def _fallback_summary(content: str) -> str:
+    content = re.sub(r"\s+", " ", (content or "").strip())
+    if len(content) <= _RAG_SUMMARY_MAX:
+        return content
+    return content[:_RAG_SUMMARY_MAX] + "..."
+
+
+def _cached_summaries(store: Any, ids: list[int]) -> dict[int, tuple[str, str]]:
+    if store is None or not ids:
+        return {}
+    try:
+        placeholders = ",".join("?" * len(ids))
+        rows = store.db.execute(
+            "SELECT knowledge_id, representation, content "
+            "FROM knowledge_representations "
+            f"WHERE knowledge_id IN ({placeholders}) "
+            "AND representation IN ('summary', 'compressed')",
+            ids,
+        ).fetchall()
+    except Exception:
+        return {}
+
+    ranked = {"summary": 0, "compressed": 1}
+    out: dict[int, tuple[str, str]] = {}
+    for row in rows:
+        kid = int(row["knowledge_id"])
+        rep = str(row["representation"])
+        content = str(row["content"] or "")
+        if not content:
+            continue
+        existing = out.get(kid)
+        if existing is None or ranked.get(rep, 99) < ranked.get(existing[1], 99):
+            out[kid] = (content, rep)
+    return out
+
+
+def _query_has_failure_intent(query: str) -> bool:
+    q = (query or "").lower()
+    return any(term in q for term in _FAILURE_TERMS)
+
+
+def _query_has_preference_intent(query: str) -> bool:
+    q = (query or "").lower()
+    return any(term in q for term in _PREFERENCE_TERMS)
+
+
+def _query_terms(query: str) -> set[str]:
+    return {
+        t.lower()
+        for t in re.findall(r"[A-Za-z][A-Za-z0-9_+\-./]{1,}|[\u4e00-\u9fff]{2,}", query or "")
+    }
+
+
+def _rag_score(item: dict[str, Any], *, query: str, phase: str | None) -> tuple[float, bool, bool, bool]:
+    base = float(item.get("rrf_score", item.get("score", 0.0)) or 0.0)
+    ktype = str(item.get("type", "") or "").lower()
+    tags = [t.lower() for t in _parse_tags(item.get("tags", []))]
+    failure = _query_has_failure_intent(query)
+    preference = _query_has_preference_intent(query)
+    phase_match = bool(phase and f"phase:{phase}".lower() in tags)
+
+    if failure:
+        if ktype in {"solution", "lesson"}:
+            base *= 1.35
+        elif any(t in {"errors", "error", "pitfalls", "bugfix"} for t in tags):
+            base *= 1.15
+    if preference:
+        has_preference_layer = "layer:preference" in tags or "layer-preference" in tags
+        has_user_preference = "user-preference" in tags
+        is_governance = (
+            "memory-governance" in tags
+            or "preference-layer" in tags
+            or "layer-cleanup" in tags
+            or "decision" in tags
+        )
+        if has_preference_layer and has_user_preference and not is_governance:
+            base *= 1.45
+            generic = {"layer:preference", "layer-preference", "user-preference"}
+            specific_tags = {t for t in tags if t not in generic}
+            if _query_terms(query) & specific_tags:
+                base *= 1.3
+        elif has_preference_layer and has_user_preference:
+            base *= 1.15
+        elif is_governance:
+            base *= 0.82
+    if phase_match:
+        base *= 1.15
+    return base, failure, phase_match, preference
+
+
+def rag_response(
+    search_result: dict[str, Any],
+    store: Any | None = None,
+    *,
+    query: str = "",
+    phase: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Return a compact RAG context plan.
+
+    The output is intentionally not full memory content. It is a deduplicated,
+    phase-aware shortlist with cached summaries when available and IDs for
+    selective follow-up through ``memory_get``.
+    """
+    hits = _flat_hits(search_result)
+    ids = [int(i["id"]) for i in hits if isinstance(i.get("id"), int)]
+    summaries = _cached_summaries(store, ids)
+
+    entries_by_key: dict[str, dict[str, Any]] = {}
+    effective_query = query or search_result.get("query", "")
+    failure_intent = _query_has_failure_intent(effective_query)
+    preference_intent = _query_has_preference_intent(effective_query)
+    for item in hits:
+        kid = item.get("id")
+        if not isinstance(kid, int):
+            continue
+        content = str(item.get("content") or item.get("title") or "")
+        cached = summaries.get(kid)
+        if cached:
+            summary, source = cached
+            summary = _fallback_summary(summary)
+        else:
+            summary, source = _fallback_summary(content), "fallback"
+        key = _normalise_for_dedupe(summary or content)
+        if not key:
+            key = f"id:{kid}"
+
+        score, _failure, phase_match, preference_match = _rag_score(item, query=effective_query, phase=phase)
+        entry = {
+            "id": kid,
+            "title": _first_line(content, _TITLE_MAX),
+            "summary": summary,
+            "summary_source": source,
+            "type": item.get("type", ""),
+            "project": item.get("project", ""),
+            "score": round(score, 6),
+            "importance": item.get("importance", "medium"),
+            "created_at": item.get("created_at", ""),
+            "related_ids": [kid],
+            "duplicate_count": 1,
+            "phase_match": phase_match,
+            "preference_match": preference_match,
+        }
+        if "rrf_score" in item:
+            entry["rrf_score"] = item.get("rrf_score")
+
+        existing = entries_by_key.get(key)
+        if existing is None:
+            entries_by_key[key] = entry
+            continue
+        existing["related_ids"].append(kid)
+        existing["duplicate_count"] += 1
+        if score > float(existing.get("score", 0.0)):
+            entry["related_ids"] = existing["related_ids"]
+            entry["duplicate_count"] = existing["duplicate_count"]
+            entries_by_key[key] = entry
+
+    entries = sorted(entries_by_key.values(), key=lambda e: e.get("score", 0.0), reverse=True)
+    if limit is not None and limit > 0:
+        entries = entries[:limit]
+
+    total_tokens = 0
+    for entry in entries:
+        est = max(1, len(json.dumps(entry, ensure_ascii=False)) // 4)
+        entry["_tokens"] = est
+        total_tokens += est
+
+    return {
+        "query": search_result.get("query"),
+        "mode": "rag",
+        "total": len(entries),
+        "candidate_total": len(hits),
+        "total_tokens": total_tokens,
+        "strategy": {
+            "retrieval": "index_then_selective_full",
+            "dedupe": "normalized_summary_or_content",
+            "summary_cache": "knowledge_representations(summary, compressed) with fallback",
+            "failure_priority": failure_intent,
+            "preference_priority": preference_intent,
+            "phase": phase or "",
+            "next_step": "Call memory_get(ids=[...]) only for entries whose summaries are relevant.",
+        },
+        "results": entries,
+    }
 
 
 # ── timeline mode ─────────────────────────────────────────────

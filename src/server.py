@@ -141,6 +141,8 @@ _IMPORTANCE_BOOST = {
 }
 USE_ADVANCED_RAG = os.environ.get("USE_ADVANCED_RAG", "auto")  # auto|true|false — HyDE + reranker
 USE_BINARY_SEARCH = os.environ.get("USE_BINARY_SEARCH", "auto")  # auto|true|false — binary quantization
+LITERAL_MATCH_BOOST = float(os.environ.get("MEMORY_LITERAL_MATCH_BOOST", "4.0"))
+LITERAL_MATCH_MIN_LEN = int(os.environ.get("MEMORY_LITERAL_MATCH_MIN_LEN", "12"))
 LOG = lambda msg: sys.stderr.write(f"[memory-mcp] {msg}\n")
 
 # ── Super Memory v5 modules (lazy init) ──
@@ -1168,7 +1170,7 @@ class Store:
                 continue
             description = stem[len(version) + 1 :].replace("_", " ") or stem
             try:
-                self.db.executescript(sql_path.read_text())
+                self.db.executescript(sql_path.read_text(encoding="utf-8"))
                 self.db.execute(
                     "INSERT OR IGNORE INTO migrations (version, description, applied_at) "
                     "VALUES (?, ?, ?)",
@@ -1714,11 +1716,16 @@ class Store:
             LOG(f"Deep-enrich-enqueue error: {e}")
 
         # Enqueue for async multi-representation embedding generation (GEM-RAG)
+        repr_stats = {"processed": 0, "failed": 0, "skipped": 0}
         try:
             from representations_queue import RepresentationsQueue
             RepresentationsQueue(self.db).enqueue(rid)
         except Exception as e:
             LOG(f"Repr-enqueue error: {e}")
+        else:
+            repr_stats = self._process_single_representation_now(rid)
+            if repr_stats.get("processed"):
+                LOG(f"Immediate repr generation complete for knowledge_id={rid}")
 
         # Ping the reflection runner (watched by LaunchAgent). The runner
         # debounces: within the debounce window, multiple saves coalesce into
@@ -2391,7 +2398,7 @@ class Store:
 
         return {"error": f"Unknown action: {action}"}
 
-    def get_rules_for_context(self, project="general", categories=None, phase=None):
+    def get_rules_for_context(self, project="general", categories=None, phase=None, detail="full"):
         """Get active rules relevant to current context.
 
         Args:
@@ -2400,6 +2407,8 @@ class Store:
             phase: optional phase filter (v8.0 lazy rule loading). When set, returns
                 core rules (no 'phase:*' tag) plus rules tagged 'phase:<phase>'.
                 Expected values: van|plan|creative|build|reflect|archive.
+            detail: "full" preserves the legacy payload; "compact" returns
+                only fields needed in prompt context.
         """
         VALID_PHASES = {"van", "plan", "creative", "build", "reflect", "archive"}
         if phase is not None and phase not in VALID_PHASES:
@@ -2441,10 +2450,64 @@ class Store:
                 "UPDATE rules SET fire_count=fire_count+1, last_fired=?, updated_at=? WHERE id=?",
                 (now, now, r["id"]))
         self.db.commit()
-        result = {"rules_count": len(rows), "rules": rows}
+        if detail == "compact":
+            rendered = [
+                {
+                    "id": r["id"],
+                    "content": self._compact_rule_content(r["content"]),
+                    "category": r.get("category", ""),
+                    "priority": r.get("priority", 0),
+                    "detail_available": len(str(r["content"] or "")) > 160,
+                }
+                for r in rows
+            ]
+        else:
+            rendered = rows
+
+        result = {"rules_count": len(rows), "rules": rendered}
+        if detail == "compact":
+            result["detail"] = "compact"
         if phase is not None:
             result["phase_filter"] = phase
         return result
+
+    @staticmethod
+    def _compact_rule_content(content, limit=160):
+        text = " ".join(str(content or "").split())
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "..."
+
+    def _process_single_representation_now(self, knowledge_id):
+        """Generate cached RAG views for one saved record immediately.
+
+        Best-effort: the async queue remains the fallback if generation or
+        embedding fails. This keeps new saves usable by mode='rag' without
+        waiting for the reflection runner.
+        """
+        try:
+            from representations import generate_representations
+            from representations_queue import RepresentationsQueue
+
+            def _embed_one(text):
+                embs = self.embed([text])
+                return embs[0] if embs else []
+
+            self.db.execute(
+                "UPDATE representations_queue SET created_at='0000-00-00T00:00:00Z' "
+                "WHERE knowledge_id=? AND status='pending'",
+                (knowledge_id,),
+            )
+            self.db.commit()
+            return RepresentationsQueue(self.db).process_pending(
+                generator=generate_representations,
+                embedder=_embed_one,
+                model_name=self._embed_mode,
+                limit=1,
+            )
+        except Exception as e:
+            LOG(f"immediate repr generation skipped for knowledge_id={knowledge_id}: {e}")
+            return {"processed": 0, "failed": 1, "skipped": 0}
 
     def set_rule_phase(self, rule_id, phase):
         """Set or clear the phase of a rule (v8.0 lazy rule loading).
@@ -3177,6 +3240,17 @@ class Recall:
             # without the column or with NULL/unknown values).
             imp = (item["r"].get("importance") or "medium").lower()
             item["importance_boost"] = _IMPORTANCE_BOOST.get(imp, 1.0)
+            q_literal = (query or "").strip().lower()
+            if len(q_literal) >= LITERAL_MATCH_MIN_LEN:
+                haystack = " ".join(
+                    str(item["r"].get(k, "") or "")
+                    for k in ("content", "context", "tags")
+                ).lower()
+                item["literal_match_boost"] = (
+                    LITERAL_MATCH_BOOST if q_literal in haystack else 1.0
+                )
+            else:
+                item["literal_match_boost"] = 1.0
 
         # B2 — per-tier decay closure for RRF.
         # For each (doc, tier) contribution we apply the half-life appropriate
@@ -3211,14 +3285,18 @@ class Recall:
             for doc_id, rrf_sc in rrf_scores.items():
                 if doc_id in results:
                     item = results[doc_id]
-                    boost = item["importance_boost"]
+                    boost = item["importance_boost"] * item["literal_match_boost"]
                     item["rrf_score"] = rrf_sc * boost
                     item["score"] *= item["decay_factor"] * boost
 
             # Documents not in any tier ranking (shouldn't happen, but safety net)
             for doc_id, item in results.items():
                 if "rrf_score" not in item:
-                    multiplier = item["decay_factor"] * item["importance_boost"]
+                    multiplier = (
+                        item["decay_factor"]
+                        * item["importance_boost"]
+                        * item["literal_match_boost"]
+                    )
                     item["score"] *= multiplier
                     item["rrf_score"] = item["score"] * 0.5  # penalized fallback
 
@@ -3227,7 +3305,11 @@ class Recall:
         else:
             # Legacy: apply decay + importance to additive scores
             for item in results.values():
-                item["score"] *= item["decay_factor"] * item["importance_boost"]
+                item["score"] *= (
+                    item["decay_factor"]
+                    * item["importance_boost"]
+                    * item["literal_match_boost"]
+                )
             ranked = sorted(results.values(), key=lambda x: x["score"], reverse=True)[:limit * 2]
 
         # Stage 4.3 (optional): Temporal-index hard filter.
@@ -3804,13 +3886,17 @@ async def list_tools():
                     "type": {"type": "string", "enum": ["decision", "fact", "solution", "lesson", "convention", "all"],
                              "default": "all"},
                     "limit": {"type": "integer", "default": 10},
-                    "mode": {"type": "string", "enum": ["search", "index", "timeline"], "default": "search",
-                             "description": "Progressive-disclosure mode: 'search' (default) = normal results, "
+                    "mode": {"type": "string", "enum": ["search", "index", "timeline", "rag"], "default": "rag",
+                             "description": "Progressive-disclosure mode: 'rag' (default) = low-token summaries, "
+                                            "'search' = normal results, "
                                             "'index' = ultra-compact metadata only (id+title+score+type+project+created_at, "
                                             "~40-60 tok/hit, no cognitive expansion, use memory_get(ids=...) to fetch full content), "
                                             "'timeline' = top-K hits expanded with ±neighbors from same session (chronological)"},
                     "neighbors": {"type": "integer", "default": 2,
-                                  "description": "Timeline mode only: how many records before/after each hit to include."},
+                                   "description": "Timeline mode only: how many records before/after each hit to include."},
+                    "phase": {"type": "string",
+                              "enum": ["van", "plan", "creative", "build", "reflect", "archive"],
+                              "description": "RAG mode only: boost records tagged phase:<phase>."},
                     "detail": {"type": "string", "enum": ["compact", "summary", "full", "auto"], "default": "full",
                                "description": "Level of detail: 'compact' ~50 tokens/result (id+title+score), "
                                               "'summary' truncates content to 150 chars, 'full' returns everything, "
@@ -3837,6 +3923,8 @@ async def list_tools():
                     "decisions_only": {"type": "boolean", "default": False,
                                        "description": "Return only structured decisions (v8.0): type=decision AND tags contain 'structured'. "
                                                       "Results include parsed schema payload under 'decision'."},
+                    "include_cognitive": {"type": "boolean", "default": False,
+                                          "description": "Set false to skip CognitiveEngine enrichment when rules/context were already loaded."},
                 },
                 "required": ["query"],
             },
@@ -4195,6 +4283,8 @@ async def list_tools():
                               "enum": ["van", "plan", "creative", "build", "reflect", "archive"],
                               "description": "Optional: lazy-load only rules relevant to this phase "
                                              "(core + phase-specific). Omit to get all rules."},
+                    "detail": {"type": "string", "enum": ["full", "compact"], "default": "full",
+                               "description": "Use compact to return only id/content/category/priority and reduce prompt tokens."},
                 },
             },
         ),
@@ -5110,9 +5200,10 @@ async def _do(name, a):
     J = lambda x: json.dumps(x, ensure_ascii=False, indent=2, default=str)
 
     if name == "memory_recall":
-        mode_param = a.get("mode", "search")
-        if mode_param not in ("search", "index", "timeline"):
-            mode_param = "search"
+        explicit_mode = "mode" in a
+        mode_param = a.get("mode", "rag")
+        if mode_param not in ("search", "index", "timeline", "rag"):
+            mode_param = "rag"
 
         detail_param = a.get("detail", "full")
         if detail_param == "auto":
@@ -5170,7 +5261,7 @@ async def _do(name, a):
 
         # Enrich with CognitiveEngine associative activation.
         # Skip for index/timeline modes — those are intentionally minimal.
-        if mode_param == "search":
+        if mode_param == "search" and a.get("include_cognitive", explicit_mode):
             try:
                 ce = _get_v5("cognitive", store.db)
                 cognitive_ctx = ce.on_query(a["query"], a.get("project"))
@@ -5308,6 +5399,41 @@ async def _do(name, a):
                 )
             except Exception as e:
                 LOG(f"timeline_response error: {e}")
+        elif mode_param == "rag":
+            try:
+                from recall_modes import rag_response
+                result = rag_response(
+                    result, store,
+                    query=a.get("query", ""),
+                    phase=a.get("phase"),
+                    limit=int(a.get("limit", 10)),
+                )
+            except Exception as e:
+                LOG(f"rag_response error: {e}")
+                try:
+                    store.log_error(
+                        SID,
+                        "memory_recall RAG workflow failed during rag_response transform.",
+                        "code_error",
+                        severity="medium",
+                        fix="Logged automatically and downgraded this call to index_response. Next run should inspect/fix recall_modes.rag_response, knowledge_representations summary/compressed cache, and representations_queue before relying on fallback.",
+                        context=f"query={a.get('query', '')!r}; project={a.get('project', '')!r}; error={e!r}",
+                        project=a.get("project", "total-agent-memory") or "total-agent-memory",
+                        tags=["rag", "memory_recall", "workflow", "auto_logged"],
+                    )
+                except Exception as log_e:
+                    LOG(f"rag_response error logging failed: {log_e}")
+                try:
+                    from recall_modes import index_response
+                    result = index_response(result)
+                    result["mode"] = "rag_fallback_index"
+                    result["rag_error"] = str(e)
+                    result["next_step"] = (
+                        "Fix RAG summary/compressed workflow, then rerun memory_recall(mode='rag')."
+                    )
+                except Exception as fallback_e:
+                    LOG(f"rag fallback index_response error: {fallback_e}")
+                    result["rag_error"] = str(e)
 
         return J(result)
 
@@ -5725,7 +5851,8 @@ async def _do(name, a):
 
     elif name == "self_rules_context":
         return J(store.get_rules_for_context(
-            a.get("project", "general"), a.get("categories"), a.get("phase")))
+            a.get("project", "general"), a.get("categories"), a.get("phase"),
+            a.get("detail", "full")))
 
     elif name == "rule_set_phase":
         return J(store.set_rule_phase(a["rule_id"], a.get("phase")))

@@ -182,7 +182,7 @@ if ($TestMode) {
         Write-Host "  ERROR: Failed to create virtual environment" -ForegroundColor Red
         exit 1
     }
-    & $VenvPip install -q --upgrade pip 2>$null
+    & $VenvPython -m pip install -q --upgrade pip 2>$null
     Write-Host "  Installing dependencies (this may take 2-3 minutes on first run)..."
     $req = [System.IO.Path]::Combine($InstallDir, "requirements.txt")
     $reqDev = [System.IO.Path]::Combine($InstallDir, "requirements-dev.txt")

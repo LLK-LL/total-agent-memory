@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import sys
 import uuid
@@ -35,6 +36,14 @@ def _now() -> str:
 
 def _new_id() -> str:
     return uuid.uuid4().hex
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return max(1, value)
 
 
 class ReflectionAgent:
@@ -119,13 +128,13 @@ class ReflectionAgent:
         synthesis_stats = self.synthesize.run(days=7)
 
         # Phase 3: Drain triple extraction queue (async pipeline from memory_save)
-        triple_stats = self._run_triple_extraction()
+        triple_stats = self._run_triple_extraction(_env_int("MEMORY_TRIPLE_DRAIN_LIMIT", 500))
 
         # Phase 4: Semantic fact merging (LLM consolidation of related facts)
         merge_stats = self._run_fact_merger()
 
         # Phase 5: Drain deep enrichment queue (entities/intent/topics)
-        enrich_stats = self._run_deep_enrichment()
+        enrich_stats = self._run_deep_enrichment(_env_int("MEMORY_ENRICH_DRAIN_LIMIT", 500))
 
         # Phase 6: Generate multi-representation embeddings (GEM-RAG)
         repr_stats = self._run_representations()
@@ -413,8 +422,8 @@ class ReflectionAgent:
         LOG("Starting drain reflection (queues only)...")
         started_at = _now()
 
-        triple_stats = self._run_triple_extraction()
-        enrich_stats = self._run_deep_enrichment()
+        triple_stats = self._run_triple_extraction(_env_int("MEMORY_TRIPLE_DRAIN_LIMIT", 500))
+        enrich_stats = self._run_deep_enrichment(_env_int("MEMORY_ENRICH_DRAIN_LIMIT", 500))
         repr_stats   = self._run_representations()
 
         report = {

@@ -14,7 +14,7 @@ def cmp_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     root = Path(__file__).parent.parent
-    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text())
+    conn.executescript((root / "migrations" / "001_v5_schema.sql").read_text(encoding="utf-8"))
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS knowledge (
@@ -23,8 +23,8 @@ def cmp_db():
         );
         """
     )
-    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text())
-    conn.executescript((root / "migrations" / "005_representations_queue.sql").read_text())
+    conn.executescript((root / "migrations" / "002_multi_representation.sql").read_text(encoding="utf-8"))
+    conn.executescript((root / "migrations" / "005_representations_queue.sql").read_text(encoding="utf-8"))
     yield conn
     conn.close()
 
@@ -49,6 +49,8 @@ def _add(db, content: str) -> int:
 def test_generate_includes_compressed_for_long_content(monkeypatch):
     from representations import generate_representations
 
+    monkeypatch.setattr("config.has_llm", lambda phase=None: True)
+
     def fake_llm(prompt: str, **_):
         p = prompt.lower()
         if "compressed" in p or "rewrite the text" in p:
@@ -71,6 +73,8 @@ def test_generate_includes_compressed_for_long_content(monkeypatch):
 def test_generate_skips_compressed_for_short_content(monkeypatch):
     from representations import generate_representations
 
+    monkeypatch.setattr("config.has_llm", lambda phase=None: True)
+
     calls: list[str] = []
 
     def fake_llm(prompt: str, **_):
@@ -83,6 +87,24 @@ def test_generate_skips_compressed_for_short_content(monkeypatch):
     # compressed should NOT have been generated
     assert result.get("compressed") == ""
     assert not any("rewrite the text" in p.lower() for p in calls)
+
+
+def test_generate_fallback_views_without_llm(monkeypatch):
+    from representations import generate_representations
+
+    monkeypatch.setattr("config.has_llm", lambda phase=None: False)
+    content = (
+        "Use memory_recall mode rag for cheap retrieval. "
+        "Keep file paths like C:\\work\\demo.txt and URLs like https://example.com/api intact. "
+        "This fallback must not call an LLM."
+    )
+
+    result = generate_representations(content)
+
+    assert result["summary"].startswith("Use memory_recall mode rag")
+    assert "memory_recall" in result["keywords"]
+    assert "https://example.com/api" in result["compressed"]
+    assert result["questions"] == ""
 
 
 # ──────────────────────────────────────────────

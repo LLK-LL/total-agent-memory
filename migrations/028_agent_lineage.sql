@@ -10,8 +10,9 @@
 -- Both columns are nullable — pre-existing rows and callers that don't pass
 -- the ids stay unaffected.
 
-ALTER TABLE knowledge ADD COLUMN agent_id TEXT DEFAULT NULL;
-ALTER TABLE knowledge ADD COLUMN parent_agent_id TEXT DEFAULT NULL;
+-- The current Store bootstrap already adds these columns idempotently before
+-- numbered migrations run. Keep this migration focused on the indexes so a
+-- fresh Windows install can complete cleanly.
 
 -- Partial indexes: we only care about rows that actually carry an id.
 CREATE INDEX IF NOT EXISTS idx_k_agent_id

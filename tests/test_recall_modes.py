@@ -154,6 +154,157 @@ def test_mode_index_skips_cognitive_expansion(monkeypatch, tmp_path):
         pass
 
 
+def test_mode_rag_dedupes_uses_cached_summary_and_prioritizes_failures():
+    from recall_modes import rag_response
+
+    class _DB:
+        def execute(self, _sql: str, _params: list[int]):
+            return self
+
+        def fetchall(self):
+            return [
+                {"knowledge_id": 1, "representation": "summary", "content": "Same cached fix summary."},
+                {"knowledge_id": 2, "representation": "summary", "content": "Same cached fix summary."},
+            ]
+
+    class _Store:
+        db = _DB()
+
+    raw = {
+        "query": "error while applying patch",
+        "results": {
+            "fact": [
+                _make_item(3, "General note about patch usage.", score=0.9, type="fact"),
+            ],
+            "solution": [
+                _make_item(1, "Long solution body one.", score=0.7, type="solution",
+                           tags=["phase:build"]),
+                _make_item(2, "Long solution body two.", score=0.6, type="solution",
+                           tags=["phase:build"]),
+            ],
+        },
+    }
+
+    out = rag_response(raw, _Store(), query=raw["query"], phase="build", limit=10)
+    assert out["mode"] == "rag"
+    assert out["strategy"]["failure_priority"] is True
+    assert out["candidate_total"] == 3
+    assert out["total"] == 2
+
+    first = out["results"][0]
+    assert first["type"] == "solution"
+    assert first["summary"] == "Same cached fix summary."
+    assert first["summary_source"] == "summary"
+    assert first["duplicate_count"] == 2
+    assert first["related_ids"] == [1, 2]
+    assert first["phase_match"] is True
+    assert "content" not in first
+
+
+def test_mode_rag_prioritizes_specific_preference_over_governance():
+    from recall_modes import rag_response
+
+    raw = {
+        "query": "QR code output preference",
+        "results": {
+            "decision": [
+                _make_item(
+                    352,
+                    "Completed layer cleanup: promoted actionable preference-layer items.",
+                    score=0.09,
+                    type="decision",
+                    project="global",
+                    tags=["memory-governance", "preference-layer", "layer-cleanup"],
+                ),
+            ],
+            "convention": [
+                _make_item(
+                    346,
+                    "Preference layer index: when the user asks for memory iteration, run the full workflow.",
+                    score=0.08,
+                    type="convention",
+                    project="global",
+                    tags=["layer:preference", "user-preference", "memory-iteration", "iteration"],
+                ),
+                _make_item(
+                    342,
+                    "Preference layer: when the user asks for a QR code, provide terminal instructions or a QR-code URL by default.",
+                    score=0.07,
+                    type="convention",
+                    project="global",
+                    tags=["layer:preference", "user-preference", "qr", "output-format"],
+                ),
+            ],
+        },
+    }
+
+    out = rag_response(raw, store=None, query=raw["query"], limit=5)
+
+    assert out["strategy"]["preference_priority"] is True
+    assert out["results"][0]["id"] == 342
+    assert out["results"][0]["preference_match"] is True
+
+
+def test_mode_rag_dispatch_skips_cognitive_expansion(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    (tmp_path / "chroma").mkdir(exist_ok=True)
+
+    import server
+    monkeypatch.setattr(server, "MEMORY_DIR", tmp_path)
+
+    s = server.Store()
+    server.store = s
+    server.recall = server.Recall(s)
+    server.SID = "sess-rag-1"
+    server.BRANCH = ""
+
+    s.db.execute(
+        "INSERT INTO sessions (id, started_at, project, status) VALUES (?, ?, ?, ?)",
+        (server.SID, "2026-04-14T00:00:00Z", "demo", "open"),
+    )
+    s.db.commit()
+
+    s.save_knowledge(
+        sid=server.SID,
+        content="Patch failure: use smaller ASCII-only apply_patch context.",
+        ktype="solution",
+        project="demo",
+        tags=["phase:build", "pitfalls"],
+    )
+
+    cognitive_called = {"yes": False}
+
+    def fake_get_v5(name, db):
+        if name == "cognitive":
+            cognitive_called["yes"] = True
+        raise RuntimeError("blocked for test")
+
+    monkeypatch.setattr(server, "_get_v5", fake_get_v5)
+
+    out_raw = asyncio.run(server._do("memory_recall", {
+        "query": "patch failure",
+        "project": "demo",
+        "mode": "rag",
+        "phase": "build",
+        "limit": 5,
+    }))
+    out = json.loads(out_raw)
+    assert out["mode"] == "rag"
+    assert cognitive_called["yes"] is False
+    assert "cognitive" not in out
+    assert out["results"], "rag mode returned nothing"
+    entry = out["results"][0]
+    assert "summary" in entry
+    assert "content" not in entry
+    assert entry["phase_match"] is True
+
+    try:
+        s.db.close()
+    except Exception:
+        pass
+
+
 # ── unit: timeline_response ──────────────────────────────────
 
 
@@ -311,7 +462,7 @@ def test_mode_timeline_falls_back_when_no_session_neighbors():
 # ── integration: backward compat ─────────────────────────────
 
 
-def test_mode_search_backward_compat(monkeypatch, tmp_path):
+def test_memory_recall_defaults_to_rag_and_explicit_search_keeps_legacy_shape(monkeypatch, tmp_path):
     """Default call (no ``mode=``) must return the legacy ``results`` dict
     shape grouped by type — existing callers break otherwise.
     """
@@ -343,12 +494,182 @@ def test_mode_search_backward_compat(monkeypatch, tmp_path):
         "query": "row-level security", "project": "demo",
     }))
     out = json.loads(raw)
+    assert out["mode"] == "rag"
+    assert isinstance(out["results"], list)
+    if out["results"]:
+        assert "summary" in out["results"][0]
+        assert "content" not in out["results"][0]
+
+    raw_search = asyncio.run(server._do("memory_recall", {
+        "query": "row-level security", "project": "demo", "mode": "search",
+    }))
+    out_search = json.loads(raw_search)
+    assert "results" in out_search
+    assert isinstance(out_search["results"], dict)
+    assert out_search.get("mode") != "rag"
+
+    try:
+        s.db.close()
+    except Exception:
+        pass
+
+
+def test_memory_recall_include_cognitive_false_skips_cognitive(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    (tmp_path / "chroma").mkdir(exist_ok=True)
+
+    import server
+    monkeypatch.setattr(server, "MEMORY_DIR", tmp_path)
+
+    s = server.Store()
+    server.store = s
+    server.recall = server.Recall(s)
+    server.SID = "sess-no-cognitive-1"
+    server.BRANCH = ""
+    s.db.execute(
+        "INSERT INTO sessions (id, started_at, project, status) VALUES (?, ?, ?, ?)",
+        (server.SID, "2026-04-14T00:00:00Z", "demo", "open"),
+    )
+    s.db.commit()
+    s.save_knowledge(
+        sid=server.SID,
+        content="Use compact rule context before recall.",
+        ktype="convention", project="demo", tags=["memory"],
+    )
+
+    cognitive_called = {"yes": False}
+
+    def fake_get_v5(name, db):
+        if name == "cognitive":
+            cognitive_called["yes"] = True
+        raise RuntimeError("blocked for test")
+
+    monkeypatch.setattr(server, "_get_v5", fake_get_v5)
+
+    raw = asyncio.run(server._do("memory_recall", {
+        "query": "compact rule context",
+        "project": "demo",
+        "include_cognitive": False,
+        "detail": "compact",
+    }))
+    out = json.loads(raw)
     assert "results" in out
-    # Legacy shape: results is a dict grouped by type, not a flat list.
-    assert isinstance(out["results"], dict)
-    # ``mode`` key must not have leaked into the legacy response.
-    assert out.get("mode") != "index"
-    assert out.get("mode") != "timeline"
+    assert "cognitive" not in out
+    assert cognitive_called["yes"] is False
+
+    try:
+        s.db.close()
+    except Exception:
+        pass
+
+
+def test_literal_identifier_match_survives_rrf_importance_boosts(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    (tmp_path / "chroma").mkdir(exist_ok=True)
+
+    import server
+    monkeypatch.setattr(server, "MEMORY_DIR", tmp_path)
+
+    s = server.Store()
+    server.store = s
+    server.recall = server.Recall(s)
+    server.SID = "sess-literal-1"
+    server.BRANCH = ""
+    s.db.execute(
+        "INSERT INTO sessions (id, started_at, project, status) VALUES (?, ?, ?, ?)",
+        (server.SID, "2026-04-14T00:00:00Z", "demo", "open"),
+    )
+    s.db.commit()
+
+    marker = "UNIQUE_LITERAL_PROBE_20260613"
+    literal_id, *_ = s.save_knowledge(
+        sid=server.SID,
+        content=f"Low importance diagnostic record with marker {marker}.",
+        ktype="fact",
+        project="demo",
+        tags=["diagnostic"],
+        importance="low",
+    )
+    for i in range(12):
+        s.save_knowledge(
+            sid=server.SID,
+            content=f"Critical memory governance and routing layer record {i}.",
+            ktype="decision",
+            project="demo",
+            tags=["memory-governance", "routing-layer"],
+            importance="critical",
+        )
+
+    monkeypatch.setattr(server, "_get_v5", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError()))
+    out = server.Recall(s).search(
+        marker,
+        project="demo",
+        ktype="all",
+        limit=5,
+        detail="full",
+        fusion="rrf",
+    )
+
+    found = [
+        item["id"]
+        for group in out["results"].values()
+        for item in group
+    ]
+    assert literal_id in found
+
+    try:
+        s.db.close()
+    except Exception:
+        pass
+
+
+def test_memory_recall_rag_error_logs_and_falls_back(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    (tmp_path / "chroma").mkdir(exist_ok=True)
+
+    import server
+    import recall_modes
+    monkeypatch.setattr(server, "MEMORY_DIR", tmp_path)
+
+    s = server.Store()
+    server.store = s
+    server.recall = server.Recall(s)
+    server.SID = "sess-rag-error-1"
+    server.BRANCH = ""
+    s.db.execute(
+        "INSERT INTO sessions (id, started_at, project, status) VALUES (?, ?, ?, ?)",
+        (server.SID, "2026-04-14T00:00:00Z", "demo", "open"),
+    )
+    s.db.commit()
+    s.save_knowledge(
+        sid=server.SID,
+        content="RAG error fallback should preserve an index result.",
+        ktype="solution", project="demo", tags=["memory"],
+    )
+
+    def broken_rag(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(recall_modes, "rag_response", broken_rag)
+
+    raw = asyncio.run(server._do("memory_recall", {
+        "query": "rag error fallback", "project": "demo", "mode": "rag",
+    }))
+    out = json.loads(raw)
+    assert out["mode"] == "rag_fallback_index"
+    assert out["rag_error"] == "boom"
+    assert isinstance(out["results"], list)
+
+    row = s.db.execute(
+        "SELECT description, fix, tags FROM errors WHERE project='demo' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert "RAG workflow failed" in row["description"]
+    assert "downgraded this call to index_response" in row["fix"]
+    assert "memory_recall" in row["tags"]
 
     try:
         s.db.close()
